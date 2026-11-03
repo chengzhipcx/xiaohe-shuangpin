@@ -15,6 +15,7 @@ import random
 import sys
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import messagebox
 
 if getattr(sys, "frozen", False):
@@ -360,9 +361,23 @@ class App(tk.Tk):
                 cx = x0 + kw / 2
                 t1 = c.create_text(cx, y0 + key_h * 0.32, text=letter,
                                    font=f_letter, fill=fg)
-                t2 = c.create_text(cx, y0 + key_h * 0.70,
-                                   text=KB_INFO[letter], font=f_sub, fill=sfg)
-                self.key_items[letter] = (poly, t1, t2)
+                sub = KB_INFO[letter]
+                if letter in ("U", "I", "V"):
+                    # 声母 sh / ch / zh 用红色醒目标出
+                    left, ini = sub.split("·", 1)
+                    fm = tkfont.Font(font=f_sub)
+                    lw, rw = fm.measure(left), fm.measure(ini)
+                    start = cx - (lw + rw) / 2
+                    ini_c = "#ff9d94" if bg != KEY_BG else RED
+                    t2 = c.create_text(start, y0 + key_h * 0.70, text=left,
+                                       font=f_sub, fill=sfg, anchor="w")
+                    t3 = c.create_text(start + lw, y0 + key_h * 0.70, text=ini,
+                                       font=f_sub, fill=ini_c, anchor="w")
+                    self.key_items[letter] = (poly, t1, t2, t3)
+                else:
+                    t2 = c.create_text(cx, y0 + key_h * 0.70,
+                                       text=sub, font=f_sub, fill=sfg)
+                    self.key_items[letter] = (poly, t1, t2)
 
     def _on_kb_configure(self, event):
         if self._kb_draw_job is not None:
