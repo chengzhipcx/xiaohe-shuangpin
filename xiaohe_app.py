@@ -296,10 +296,13 @@ class App(tk.Tk):
     def _toggle_kb(self):
         if self.show_kb.get():
             self.kb.grid()
-            self.grid_rowconfigure(3, weight=1, uniform="half")
+            self.main.grid(row=2, column=0, rowspan=1, sticky="nsew",
+                           padx=16, pady=8)
         else:
+            # 隐藏键盘后字区跨两行占满整个窗口，不留空白
             self.kb.grid_remove()
-            self.grid_rowconfigure(3, weight=0)
+            self.main.grid(row=2, column=0, rowspan=2, sticky="nsew",
+                           padx=16, pady=8)
 
     def _highlight_keys(self):
         self._draw_keyboard()
