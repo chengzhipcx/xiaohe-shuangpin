@@ -189,19 +189,11 @@ class App(tk.Tk):
             self.kb, bg=BG, fg=GREY, justify="center",
             text="声母 zh→V ch→I sh→U ｜ 零声母 = 韵母首字母 + 韵母键（爱 ai→ad）｜ er 除外 ｜ 空格跳过")
         self.lb_rule.pack(side="bottom", pady=(0, 6))
-        kb_inner = tk.Frame(self.kb, bg=BG)
-        kb_inner.pack(expand=True)
-        self.key_labels = {}
-        for r, row in enumerate(KB_ROWS):
-            rf = tk.Frame(kb_inner, bg=BG)
-            rf.pack(anchor="center", pady=2)
-            for letter in row:
-                key = tk.Label(rf, text=f"{letter}\n{KB_INFO[letter]}", width=9,
-                               justify="center", bg=KEY_BG, fg=FG,
-                               highlightthickness=1,
-                               highlightbackground=KEY_BORDER)
-                key.pack(side="left", padx=2)
-                self.key_labels[letter] = key
+        self.kcanvas = tk.Canvas(self.kb, bg=BG, highlightthickness=0, bd=0)
+        self.kcanvas.pack(fill="both", expand=True)
+        self.key_items = {}          # letter -> (poly_id, text_id, sub_id)
+        self._kb_draw_job = None
+        self.kcanvas.bind("<Configure>", self._on_kb_configure)
 
     def _rescale(self):
         w = max(self.winfo_width(), 1)
@@ -216,8 +208,6 @@ class App(tk.Tk):
                      ("Consolas", max(15, int(40 * s)), "bold")),
             "status": ((YA, 16), (YA, max(11, int(16 * s)))),
             "rule": ((YA, 11), (YA, max(9, int(11 * s)))),
-            "key": (("Consolas", 12, "bold"),
-                    ("Consolas", max(8, int(12 * min(s, 1.3))), "bold")),
             "ctrl": ((YA, 11), (YA, max(10, int(11 * s)))),
         }
         for kind, (small, big) in fonts.items():
@@ -239,9 +229,6 @@ class App(tk.Tk):
                     self.lb_status.configure(font=big)
                 elif kind == "rule":
                     self.lb_rule.configure(font=small)
-                elif kind == "key":
-                    for lab in self.key_labels.values():
-                        lab.configure(font=big)
                 elif kind == "ctrl":
                     self.scope_menu.configure(font=small)
                     self.cb_py.configure(font=small)
@@ -315,17 +302,69 @@ class App(tk.Tk):
             self.grid_rowconfigure(3, weight=0)
 
     def _highlight_keys(self):
+        self._draw_keyboard()
+
+    # ---------- 键盘图（Canvas 圆角键帽，铺满下半区） ----------
+    @staticmethod
+    def _round_pts(x0, y0, x1, y1, r, seg=7):
+        """圆角矩形的平滑多边形顶点"""
+        import math
+        r = max(2, min(r, (x1 - x0) / 2 - 1, (y1 - y0) / 2 - 1))
+        pts = []
+        corners = [(x1 - r, y0 + r, -90), (x1 - r, y1 - r, 0),
+                   (x0 + r, y1 - r, 90), (x0 + r, y0 + r, 180)]
+        for cx, cy, a0 in corners:
+            for t in range(seg + 1):
+                a = math.radians(a0 + 90 * t / seg)
+                pts.extend([cx + r * math.cos(a), cy + r * math.sin(a)])
+        return pts
+
+    def _draw_keyboard(self, event=None):
+        c = self.kcanvas
+        W, H = c.winfo_width(), c.winfo_height()
+        if W < 60 or H < 50 or self.cur is None:
+            return
+        c.delete("all")
+        self.key_items = {}
+        gap = max(5, int(W * 0.006))
+        vgap = max(5, int(H * 0.045))
+        rows = KB_ROWS
+        key_h = (H - (len(rows) - 1) * vgap) / len(rows)
+        key_h = min(key_h, 130)
+        rad = min(20, key_h * 0.30)
+        f_letter = ("Consolas", max(9, int(key_h * 0.20)), "bold")
+        f_sub = (YA, max(8, int(key_h * 0.135)))
         k1, k2 = self.cur["f"][0].upper(), self.cur["f"][1].upper()
-        for letter, lab in self.key_labels.items():
-            if letter == k1 == k2:
-                bg, fg = PURPLE, "#ffffff"
-            elif letter == k1:
-                bg, fg = BLUE, "#ffffff"
-            elif letter == k2:
-                bg, fg = ORANGE, "#ffffff"
-            else:
-                bg, fg = KEY_BG, FG
-            lab.configure(bg=bg, fg=fg)
+        for ri, row in enumerate(rows):
+            n = len(row)
+            kw = (W - (n + 1) * gap) / n
+            y0 = ri * (key_h + vgap)
+            for i, letter in enumerate(row):
+                x0 = gap + i * (kw + gap)
+                x1 = x0 + kw
+                if letter == k1 == k2:
+                    bg, fg, sfg = PURPLE, "#ffffff", "#ffffff"
+                elif letter == k1:
+                    bg, fg, sfg = BLUE, "#ffffff", "#dcebff"
+                elif letter == k2:
+                    bg, fg, sfg = ORANGE, "#ffffff", "#fff0d9"
+                else:
+                    bg, fg, sfg = KEY_BG, FG, GREY
+                poly = c.create_polygon(
+                    *self._round_pts(x0, y0, x0 + kw, y0 + key_h, rad),
+                    smooth=True, fill=bg,
+                    outline=("#c9d4e0" if bg == KEY_BG else bg), width=1)
+                cx = x0 + kw / 2
+                t1 = c.create_text(cx, y0 + key_h * 0.32, text=letter,
+                                   font=f_letter, fill=fg)
+                t2 = c.create_text(cx, y0 + key_h * 0.70,
+                                   text=KB_INFO[letter], font=f_sub, fill=sfg)
+                self.key_items[letter] = (poly, t1, t2)
+
+    def _on_kb_configure(self, event):
+        if self._kb_draw_job is not None:
+            self.after_cancel(self._kb_draw_job)
+        self._kb_draw_job = self.after(60, self._draw_keyboard)
 
     def on_key(self, event):
         ks = event.keysym
