@@ -255,8 +255,8 @@ class App(tk.Tk):
 
         self.main = tk.Frame(self)
         self.main.grid(row=2, column=0, sticky="nsew", padx=16, pady=8)
-        # 段落显示（经典模式可见）
-        self.t_text = tk.Text(self.main, height=1, wrap="char", bd=0,
+        # 段落显示（经典模式可见）：两行上下文，当前字高亮
+        self.t_text = tk.Text(self.main, height=2, wrap="char", bd=0,
                               highlightthickness=0, takefocus=0,
                               cursor="arrow")
         self.t_text.tag_configure("done")
@@ -267,14 +267,14 @@ class App(tk.Tk):
         self.lb_py = tk.Label(self.main)
         self.lb_py.pack()
         slots = tk.Frame(self.main)
-        slots.pack(pady=(4, 0))
+        slots.pack(pady=(2, 0))
         self.slots = slots
         self.slot1 = tk.Label(slots, text="＿")
         self.slot1.pack(side="left", padx=8)
         self.slot2 = tk.Label(slots, text="＿")
         self.slot2.pack(side="left", padx=8)
         self.lb_status = tk.Label(self.main)
-        self.lb_status.pack(pady=(2, 0))
+        self.lb_status.pack(pady=(0, 0))
 
         self.kb = tk.Frame(self)
         self.kb.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 12))
@@ -393,16 +393,16 @@ class App(tk.Tk):
             "title": ((YA, 15, "bold"), (YA, max(13, int(15 * s)), "bold")),
             "stats": ((YA, 12), (YA, max(10, int(12 * s)))),
             "char": ((YA, 82, "bold"), (YA, max(24, int(82 * s)), "bold")),
-            "char_text": ((YA, 54, "bold"),
-                          (YA, max(18, int(54 * s)), "bold")),
+            "char_text": ((YA, 44, "bold"),
+                          (YA, max(15, int(44 * s)), "bold")),
             "py": ((YA, 28), (YA, max(13, int(28 * s)))),
-            "py_text": ((YA, 22), (YA, max(11, int(22 * s)))),
+            "py_text": ((YA, 16), (YA, max(9, int(16 * s)))),
             "slot": (("Consolas", 40, "bold"),
                      ("Consolas", max(15, int(40 * s)), "bold")),
             "status": ((YA, 16), (YA, max(11, int(16 * s)))),
             "rule": ((YA, 11), (YA, max(9, int(11 * s)))),
             "ctrl": ((YA, 11), (YA, max(10, int(11 * s)))),
-            "text": ((YA, 22), (YA, max(12, int(22 * s)))),
+            "text": ((YA, 20), (YA, max(11, int(20 * s)))),
         }
         try:
             self.lb_title.configure(font=fonts["title"][1])
@@ -422,8 +422,7 @@ class App(tk.Tk):
             for w2 in (self.theme_menu, self.content_menu, self.scope_menu,
                        self.cb_py, self.cb_kb, self.btn_reset):
                 w2.configure(font=fonts["ctrl"][0])
-            self.t_text.configure(font=fonts["text"][1],
-                                  spacing1=fonts["text"][1][1] // 2)
+            self.t_text.configure(font=fonts["text"][1], spacing1=1)
         except tk.TclError:
             pass
 
@@ -472,7 +471,7 @@ class App(tk.Tk):
                                         else "")
             self.content_name.set(name)
             self.scope_menu.pack_forget()
-            self.t_text.pack(fill="x", pady=(2, 0),
+            self.t_text.pack(fill="x", pady=(0, 0),
                              before=self.lb_char)
             ch = self.pos_map.get(self.content_id, [0, 0]) if restore else [0, 0]
             self.t_ch, self.t_seg = ch[0], ch[1]
@@ -646,23 +645,34 @@ class App(tk.Tk):
             self.lb_py.configure(text="· ·（拼音已隐藏）")
 
     def _render_segment(self):
+        """显示当前句上下文（约两行），当前字高亮，随打字滚动。"""
         ch = self._chapter()
         if ch is None:
             return
-        s0, s1 = self.t_segs[self.t_seg]
+        body = ch["body"]
+        s0, _s1 = self.t_segs[self.t_seg]
+        e = self.t_pos
+        # 锚定句首（。？！；之后），向后再取约两屏字符
+        d0 = max(body.rfind(p, 0, s0) for p in "。？！；") + 1
+        d1 = min(len(body), d0 + 72)
+        if e >= d1:                     # 超长句：以当前字为尾锚
+            d1 = min(len(body), e + 12)
+            d0 = max(0, d1 - 72)
         t = self.t_text
         t.configure(state="normal")
         t.delete("1.0", "end")
-        t.insert("1.0", ch["body"][s0:s1])
-        e = self.t_pos
-        body = ch["body"]
-        for i in range(s0, s1):
+        t.insert("1.0", body[d0:d1])
+        for i in range(d0, d1):
             tag = "done" if i < e else ("cur" if i == e else None)
             if tag:
-                t.tag_add(tag, f"1.{i - s0}", f"1.{i - s0 + 1}")
-        if e > s0:
-            t.tag_add("done", "1.0", f"1.{min(e, s1) - s0}")
+                t.tag_add(tag, f"1.{i - d0}", f"1.{i - d0 + 1}")
+        if e > d0:
+            t.tag_add("done", "1.0", f"1.{min(e, d1) - d0}")
         t.configure(state="disabled")
+        try:
+            t.see(f"1.{e - d0}")        # 保证当前字可见
+        except tk.TclError:
+            pass
         self._refresh_scope_label()
 
     def _save_text_pos(self):
