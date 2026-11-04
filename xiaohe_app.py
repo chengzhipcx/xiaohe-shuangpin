@@ -8,10 +8,14 @@
         iang/uang=L ai=D en=F eng=G ang=H an=J ou=Z ia/ua=X iao=N
         ao=C ui=V in=B ian=M
   零声母：韵母首字母 + 韵母键（爱 ai→ad、恩 en→ef），er 例外→er
+
+内容：常用 2000 字随机练习，或《道德经》/四书五经整段打字（texts.json）。
+主题：跟随系统 / 浅色 / 深色（设置保存在 stats.json）。
 """
 import json
 import os
 import random
+import re
 import sys
 import time
 import tkinter as tk
@@ -27,27 +31,35 @@ else:
     _RES_DIR = _BASE_DIR
 APP_DIR = _BASE_DIR
 DATA_FILE = os.path.join(_RES_DIR, "xiaohe_data.json")
+TEXTS_FILE = os.path.join(_RES_DIR, "texts.json")
 ICON_FILE = os.path.join(_RES_DIR, "app.ico")
 STATS_FILE = os.path.join(APP_DIR, "stats.json")
 
-BG = "#eef1f6"
-PANEL = "#ffffff"
-FG = "#22303f"
-BLUE = "#1e88e5"     # 声母位高亮
-ORANGE = "#fb8c00"   # 韵母位高亮
-PURPLE = "#8e44ad"   # 两键相同
-GREEN = "#2f9e44"
-RED = "#d6453d"
-GREY = "#8a97a5"
-KEY_BG = "#ffffff"
-KEY_BORDER = "#d5dce4"
-
 YA = "Microsoft YaHei UI"
+
+# ---------- 主题调色板 ----------
+LIGHT = dict(
+    bg="#eef1f6", panel="#ffffff", fg="#22303f", grey="#8a97a5",
+    blue="#1e88e5", orange="#fb8c00", purple="#8e44ad",
+    green="#2f9e44", red="#d6453d",
+    key_bg="#ffffff", key_mod="#eef2f6", key_border="#cfd8e2",
+    ctrl_bg="#e2e8f0", ctrl_active="#d3dce6", ctrl_fg="#22303f",
+    select="#ffffff", hl_sub="#dcebff", menu_bg="#ffffff",
+)
+DARK = dict(
+    bg="#15181e", panel="#1e232b", fg="#e8ecf1", grey="#8a97a5",
+    blue="#3d8bfd", orange="#f5a623", purple="#a06cd5",
+    green="#4caf50", red="#e05a52",
+    key_bg="#2a303a", key_mod="#22272f", key_border="#3a424e",
+    ctrl_bg="#2a303a", ctrl_active="#363d49", ctrl_fg="#e8ecf1",
+    select="#3a424e", hl_sub="#bcd9ff", menu_bg="#262b33",
+)
+
+THEMES = [("跟随系统", "system"), ("浅色", "light"), ("深色", "dark")]
 
 SCOPES = [("前 300 字", 300), ("前 600 字", 600),
           ("前 1000 字", 1000), ("前 1500 字", 1500), ("全部 2000 字", None)]
 
-KB_ROWS = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"]
 KB_INFO = {
     "Q": "iu", "W": "ei", "E": "e", "R": "uan", "T": "ue", "Y": "un",
     "U": "u·sh", "I": "i·ch", "O": "o·uo", "P": "ie",
@@ -56,6 +68,37 @@ KB_INFO = {
     "Z": "ou", "X": "ia·ua", "C": "ao", "V": "ui·zh", "B": "in",
     "N": "iao", "M": "ian",
 }
+# 真实键盘布局（ANSI，总键距 15u）：(标签, 键宽u)
+KB_ROWS = [
+    [("`", 1), ("1", 1), ("2", 1), ("3", 1), ("4", 1), ("5", 1), ("6", 1),
+     ("7", 1), ("8", 1), ("9", 1), ("0", 1), ("-", 1), ("=", 1), ("⌫", 2)],
+    [("Tab", 1.5)] + [(c, 1) for c in "QWERTYUIOP"] + [("[", 1), ("]", 1), ("\\", 1.5)],
+    [("Caps", 1.75)] + [(c, 1) for c in "ASDFGHJKL"] + [(";", 1), ("'", 1), ("Enter", 2.25)],
+    [("Shift", 2.25)] + [(c, 1) for c in "ZXCVBNM"] + [(",", 1), (".", 1), ("/", 1), ("Shift", 2.75)],
+    [("Ctrl", 1.25), ("Win", 1.25), ("Alt", 1.25), ("空格", 6.25),
+     ("Alt", 1.25), ("Win", 1.25), ("Fn", 1.25), ("Ctrl", 1.25)],
+]
+KB_UNIT_TOTAL = 15.0
+
+HANZI = re.compile(r"[\u3400-\u9fff]")
+PUNCT = "，。？！；：、·—…《》〈〉（）"
+
+SEG_LIMIT = 16          # 段内最多汉字数
+
+
+def sys_prefers_dark():
+    """读取 Windows「应用深色模式」注册表（非 win 平台视为浅色）。"""
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return int(val) == 0
+    except Exception:
+        return False
 
 
 def _pre_disable_ime():
@@ -84,7 +127,6 @@ class App(tk.Tk):
         self.title("小鹤双拼练习")
         self.geometry("1000x700")
         self.minsize(780, 540)
-        self.configure(bg=BG)
         try:
             self.iconbitmap(ICON_FILE)
         except Exception:
@@ -92,9 +134,27 @@ class App(tk.Tk):
 
         with open(DATA_FILE, encoding="utf-8") as f:
             self.chars = json.load(f)
-        self.cum = self._load_stats()
+        self.books = []
+        try:
+            with open(TEXTS_FILE, encoding="utf-8") as f:
+                self.books = json.load(f).get("texts", [])
+        except Exception:
+            pass
+
+        # 设置 / 统计
+        store = self._load_store()
+        self.cum = {"practiced": store.get("practiced", 0),
+                    "correct": store.get("correct", 0),
+                    "wrong": store.get("wrong", 0)}
+        self.theme_mode = store.get("theme", "system")
+        self.content_id = store.get("content", "chars")
+        self.pos_map = store.get("pos", {})
 
         self.scope_name = tk.StringVar(value="前 1000 字")
+        self.theme_name = tk.StringVar(
+            value=next((n for n, v in THEMES if v == self.theme_mode),
+                       "跟随系统"))
+        self.content_name = tk.StringVar(value="常用 2000 字")
         self.show_py = tk.BooleanVar(value=True)
         self.show_kb = tk.BooleanVar(value=True)
 
@@ -109,8 +169,21 @@ class App(tk.Tk):
         self.best = 0
         self._auto_next_job = None
         self._resize_job = None
+        self._cur_eff_dark = None
 
+        # 经典文本模式状态
+        self.book = None             # 当前书 dict 或 None
+        self.t_ch = 0                # 章下标
+        self.t_seg = 0               # 段下标
+        self.t_pos = 0               # 段内下一个待输入字（body 绝对下标）
+        self.t_segs = []             # 当前章的段 [(s0, s1), ...]
+        self.t_ch_counts = []        # 每章段数（缓存）
+        self.t_total = 0             # 全书总段数
+
+        self.P = LIGHT               # 当前调色板
         self._build_ui()
+        self._apply_theme()
+        self._select_content(self.content_id, restore=True)
         self._toggle_kb()
         self.update_idletasks()
         self._rescale()
@@ -120,7 +193,6 @@ class App(tk.Tk):
         self.bind("<ButtonRelease-1>", lambda e: self.focus_set())
         self.bind("<Configure>", self.on_resize)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-        self._next_char(first=True)
         self.after(1000, self._tick)
 
     # ---------- UI ----------
@@ -130,72 +202,152 @@ class App(tk.Tk):
         self.grid_rowconfigure(3, weight=1, uniform="half")
         self.grid_columnconfigure(0, weight=1)
 
-        top = tk.Frame(self, bg=BG)
+        top = tk.Frame(self)
         top.grid(row=0, column=0, sticky="ew", padx=16, pady=(10, 2))
-        self.lb_title = tk.Label(top, text="⌨ 小鹤双拼练习", bg=BG, fg=FG)
+        self.top = top
+        self.lb_title = tk.Label(top, text="⌨ 小鹤双拼练习")
         self.lb_title.pack(side="left")
 
-        right = tk.Frame(top, bg=BG)
+        right = tk.Frame(top)
         right.pack(side="right")
-        self.scope_menu = tk.OptionMenu(
-            right, self.scope_name, *[n for n, _ in SCOPES],
-            command=lambda _v: self.reset_session())
-        self.scope_menu.configure(relief="flat", bg="#e2e8f0",
-                                  activebackground="#d3dce6", takefocus=0)
-        self.scope_menu["menu"].configure(bg="#ffffff", font=(YA, 11))
+        self.theme_menu = self._mk_menu(right, self.theme_name,
+                                        [n for n, _ in THEMES],
+                                        self.on_theme_change)
+        self.theme_menu.pack(side="left", padx=(0, 10))
+        self.content_menu = self._mk_menu(
+            right, self.content_name, self._content_names(),
+            self.on_content_change)
+        self.content_menu.pack(side="left", padx=(0, 10))
+        self.scope_menu = self._mk_menu(
+            right, self.scope_name, [n for n, _ in SCOPES],
+            lambda _v: self.reset_session())
         self.scope_menu.pack(side="left", padx=(0, 10))
-        self.cb_py = tk.Checkbutton(right, text="显示拼音", variable=self.show_py,
-                                    command=self._toggle_py, bg=BG, fg=FG,
-                                    activebackground=BG, selectcolor="#ffffff",
+        self.cb_py = tk.Checkbutton(right, text="显示拼音",
+                                    variable=self.show_py,
+                                    command=self._refresh_answer,
                                     takefocus=0)
         self.cb_py.pack(side="left", padx=4)
-        self.cb_kb = tk.Checkbutton(right, text="键位图", variable=self.show_kb,
-                                    command=self._toggle_kb, bg=BG, fg=FG,
-                                    activebackground=BG, selectcolor="#ffffff",
-                                    takefocus=0)
+        self.cb_kb = tk.Checkbutton(right, text="键位图",
+                                    variable=self.show_kb,
+                                    command=self._toggle_kb, takefocus=0)
         self.cb_kb.pack(side="left", padx=4)
-        self.btn_reset = tk.Button(right, text="重新开始", command=self.reset_session,
-                                   relief="flat", bg="#e2e8f0", fg=FG,
-                                   activebackground="#d3dce6", takefocus=0,
-                                   padx=12)
+        self.btn_reset = tk.Button(right, text="重新开始",
+                                   command=self.reset_session,
+                                   relief="flat", takefocus=0, padx=12)
         self.btn_reset.pack(side="left", padx=(10, 0))
 
-        bar = tk.Frame(self, bg=BG)
+        bar = tk.Frame(self)
         bar.grid(row=1, column=0, sticky="ew", padx=16, pady=(2, 0))
-        self.lb_scope = tk.Label(bar, bg=BG, fg=GREY)
+        self.bar = bar
+        self.lb_scope = tk.Label(bar)
         self.lb_scope.pack(side="left")
-        self.lb_stats = tk.Label(bar, bg=BG, fg=FG)
+        self.lb_stats = tk.Label(bar)
         self.lb_stats.pack(side="left", padx=18)
-        self.lb_cum = tk.Label(bar, bg=BG, fg=GREY)
+        self.lb_cum = tk.Label(bar)
         self.lb_cum.pack(side="right")
 
-        self.main = tk.Frame(self, bg=PANEL)
+        self.main = tk.Frame(self)
         self.main.grid(row=2, column=0, sticky="nsew", padx=16, pady=8)
-        self.lb_char = tk.Label(self.main, bg=PANEL, fg=FG)
+        # 段落显示（经典模式可见）
+        self.t_text = tk.Text(self.main, height=1, wrap="char", bd=0,
+                              highlightthickness=0, takefocus=0,
+                              cursor="arrow")
+        self.t_text.tag_configure("done")
+        self.t_text.tag_configure("cur")
+        self.t_text.tag_configure("todo")
+        self.lb_char = tk.Label(self.main)
         self.lb_char.pack(expand=True)
-        self.lb_py = tk.Label(self.main, bg=PANEL, fg=GREY)
+        self.lb_py = tk.Label(self.main)
         self.lb_py.pack()
-        slots = tk.Frame(self.main, bg=PANEL)
+        slots = tk.Frame(self.main)
         slots.pack(pady=(4, 0))
-        self.slot1 = tk.Label(slots, text="＿", bg=PANEL, fg=GREY)
+        self.slots = slots
+        self.slot1 = tk.Label(slots, text="＿")
         self.slot1.pack(side="left", padx=8)
-        self.slot2 = tk.Label(slots, text="＿", bg=PANEL, fg=GREY)
+        self.slot2 = tk.Label(slots, text="＿")
         self.slot2.pack(side="left", padx=8)
-        self.lb_status = tk.Label(self.main, bg=PANEL, fg=GREY)
+        self.lb_status = tk.Label(self.main)
         self.lb_status.pack(pady=(2, 0))
 
-        self.kb = tk.Frame(self, bg=BG)
+        self.kb = tk.Frame(self)
         self.kb.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 12))
         self.lb_rule = tk.Label(
-            self.kb, bg=BG, fg=GREY, justify="center",
+            self.kb, justify="center",
             text="声母 zh→V ch→I sh→U ｜ 零声母 = 韵母首字母 + 韵母键（爱 ai→ad）｜ er 除外 ｜ 空格跳过")
         self.lb_rule.pack(side="bottom", pady=(0, 6))
-        self.kcanvas = tk.Canvas(self.kb, bg=BG, highlightthickness=0, bd=0)
+        self.kcanvas = tk.Canvas(self.kb, highlightthickness=0, bd=0)
         self.kcanvas.pack(fill="both", expand=True)
-        self.key_items = {}          # letter -> (poly_id, text_id, sub_id)
+        self.key_items = {}          # letter -> item ids
         self._kb_draw_job = None
         self.kcanvas.bind("<Configure>", self._on_kb_configure)
 
+    def _mk_menu(self, parent, var, names, command):
+        m = tk.OptionMenu(parent, var, *names, command=command)
+        m.configure(relief="flat", takefocus=0)
+        m["menu"].configure(font=(YA, 11))
+        return m
+
+    def _content_names(self):
+        names = ["常用 2000 字"]
+        names += [b["name"] + ("（选）" if b.get("select") else "")
+                  for b in self.books]
+        return names
+
+    # ---------- 主题 ----------
+    def on_theme_change(self, _value):
+        self.theme_mode = dict(THEMES)[self.theme_name.get()]
+        self._save_store()
+        self._apply_theme()
+
+    def _eff_dark(self):
+        if self.theme_mode == "dark":
+            return True
+        if self.theme_mode == "system":
+            return sys_prefers_dark()
+        return False
+
+    def _apply_theme(self):
+        self.P = DARK if self._eff_dark() else LIGHT
+        self._cur_eff_dark = self._eff_dark()
+        P = self.P
+        self.configure(bg=P["bg"])
+        self.top.configure(bg=P["bg"])
+        self.lb_title.configure(bg=P["bg"], fg=P["fg"])
+        self.bar.configure(bg=P["bg"])
+        self.lb_scope.configure(bg=P["bg"], fg=P["grey"])
+        self.lb_stats.configure(bg=P["bg"], fg=P["fg"])
+        self.lb_cum.configure(bg=P["bg"], fg=P["grey"])
+        for w in (self.theme_menu, self.content_menu, self.scope_menu):
+            w.configure(bg=P["ctrl_bg"], fg=P["ctrl_fg"],
+                        activebackground=P["ctrl_active"],
+                        activeforeground=P["ctrl_fg"])
+            w["menu"].configure(bg=P["menu_bg"], fg=P["ctrl_fg"],
+                                activebackground=P["ctrl_active"],
+                                activeforeground=P["ctrl_fg"])
+        for cb in (self.cb_py, self.cb_kb):
+            cb.configure(bg=P["bg"], fg=P["fg"], activebackground=P["bg"],
+                         selectcolor=P["select"])
+        self.btn_reset.configure(bg=P["ctrl_bg"], fg=P["ctrl_fg"],
+                                 activebackground=P["ctrl_active"],
+                                 activeforeground=P["ctrl_fg"])
+        self.main.configure(bg=P["panel"])
+        self.t_text.configure(bg=P["panel"], fg=P["fg"],
+                              insertbackground=P["fg"])
+        self.t_text.tag_configure("done", foreground=P["grey"])
+        self.t_text.tag_configure("cur", background=P["blue"],
+                                  foreground="#ffffff")
+        self.t_text.tag_configure("todo", foreground=P["fg"])
+        self.lb_char.configure(bg=P["panel"], fg=P["fg"])
+        self.lb_py.configure(bg=P["panel"], fg=P["grey"])
+        self.slots.configure(bg=P["panel"])
+        for s in (self.slot1, self.slot2, self.lb_status):
+            s.configure(bg=P["panel"], fg=P["grey"])
+        self.kb.configure(bg=P["bg"])
+        self.lb_rule.configure(bg=P["bg"], fg=P["grey"])
+        self.kcanvas.configure(bg=P["bg"])
+        self._highlight_keys()
+
+    # ---------- 缩放 ----------
     def _rescale(self):
         w = max(self.winfo_width(), 1)
         h = max(self.winfo_height(), 1)
@@ -204,39 +356,39 @@ class App(tk.Tk):
             "title": ((YA, 15, "bold"), (YA, max(13, int(15 * s)), "bold")),
             "stats": ((YA, 12), (YA, max(10, int(12 * s)))),
             "char": ((YA, 82, "bold"), (YA, max(24, int(82 * s)), "bold")),
+            "char_text": ((YA, 54, "bold"),
+                          (YA, max(18, int(54 * s)), "bold")),
             "py": ((YA, 28), (YA, max(13, int(28 * s)))),
+            "py_text": ((YA, 22), (YA, max(11, int(22 * s)))),
             "slot": (("Consolas", 40, "bold"),
                      ("Consolas", max(15, int(40 * s)), "bold")),
             "status": ((YA, 16), (YA, max(11, int(16 * s)))),
             "rule": ((YA, 11), (YA, max(9, int(11 * s)))),
             "ctrl": ((YA, 11), (YA, max(10, int(11 * s)))),
+            "text": ((YA, 22), (YA, max(12, int(22 * s)))),
         }
-        for kind, (small, big) in fonts.items():
-            try:
-                if kind == "title":
-                    self.lb_title.configure(font=big)
-                elif kind == "stats":
-                    self.lb_stats.configure(font=big)
-                    self.lb_scope.configure(font=small)
-                    self.lb_cum.configure(font=small)
-                elif kind == "char":
-                    self.lb_char.configure(font=big)
-                elif kind == "py":
-                    self.lb_py.configure(font=big)
-                elif kind == "slot":
-                    self.slot1.configure(font=big)
-                    self.slot2.configure(font=big)
-                elif kind == "status":
-                    self.lb_status.configure(font=big)
-                elif kind == "rule":
-                    self.lb_rule.configure(font=small)
-                elif kind == "ctrl":
-                    self.scope_menu.configure(font=small)
-                    self.cb_py.configure(font=small)
-                    self.cb_kb.configure(font=small)
-                    self.btn_reset.configure(font=small)
-            except tk.TclError:
-                pass
+        try:
+            self.lb_title.configure(font=fonts["title"][1])
+            self.lb_stats.configure(font=fonts["stats"][1])
+            self.lb_scope.configure(font=fonts["stats"][0])
+            self.lb_cum.configure(font=fonts["stats"][0])
+            self.lb_char.configure(
+                font=fonts["char_text" if self._is_text_mode()
+                           else "char"][1])
+            self.lb_py.configure(
+                font=fonts["py_text" if self._is_text_mode()
+                           else "py"][1])
+            self.slot1.configure(font=fonts["slot"][1])
+            self.slot2.configure(font=fonts["slot"][1])
+            self.lb_status.configure(font=fonts["status"][1])
+            self.lb_rule.configure(font=fonts["rule"][0])
+            for w2 in (self.theme_menu, self.content_menu, self.scope_menu,
+                       self.cb_py, self.cb_kb, self.btn_reset):
+                w2.configure(font=fonts["ctrl"][0])
+            self.t_text.configure(font=fonts["text"][1],
+                                  spacing1=fonts["text"][1][1] // 2)
+        except tk.TclError:
+            pass
 
     # ---------- 练习逻辑 ----------
     def _disable_ime(self):
@@ -265,34 +417,191 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    # ----- 内容选择 -----
+    def _is_text_mode(self):
+        return self.book is not None
+
+    def _select_content(self, cid, restore=False):
+        self.book = next((b for b in self.books
+                          if b["id"] == cid and b.get("chapters")), None)
+        self.content_id = cid if self.book else "chars"
+        if self.book is None:
+            self.content_name.set("常用 2000 字")
+            self.scope_menu.pack(side="left", padx=(0, 10),
+                                 before=self.cb_py)
+            self.t_text.pack_forget()
+        else:
+            name = self.book["name"] + ("（选）" if self.book.get("select")
+                                        else "")
+            self.content_name.set(name)
+            self.scope_menu.pack_forget()
+            self.t_text.pack(fill="x", pady=(2, 0),
+                             before=self.lb_char)
+            ch = self.pos_map.get(self.content_id, [0, 0]) if restore else [0, 0]
+            self.t_ch, self.t_seg = ch[0], ch[1]
+            self._cache_book()
+            self._load_segments()
+            self.t_pos = 0
+        self._save_store()
+        self._rescale()
+        self.reset_session(keep_pos=restore)
+
+    def on_content_change(self, value):
+        name = value.replace("（选）", "")
+        cid = next((b["id"] for b in self.books if b["name"] == name),
+                   "chars")
+        self._select_content(cid)
+
+    def _chapters(self):
+        return self.book["chapters"] if self.book else []
+
+    def _chapter(self):
+        chs = self._chapters()
+        return chs[self.t_ch] if chs else None
+
+    def _cache_book(self):
+        self.t_ch_counts = [len(self._segments_of(c["body"]))
+                            for c in self._chapters()]
+        self.t_total = sum(self.t_ch_counts)
+
+    def _segments_of(self, body):
+        """把章正文切成 ≤SEG_LIMIT 个汉字的段（标点跟随前段）。"""
+        segs, start, count = [], 0, 0
+        for i, ch in enumerate(body):
+            if ch in PUNCT:
+                if count > 0:
+                    segs.append((start, i + 1))
+                    start, count = i + 1, 0
+                else:
+                    start = i + 1
+            elif HANZI.fullmatch(ch):
+                count += 1
+                if count >= SEG_LIMIT:
+                    segs.append((start, i + 1))
+                    start, count = i + 1, 0
+        if start < len(body) and count > 0:
+            segs.append((start, len(body)))
+        return segs
+
+    def _load_segments(self):
+        chs = self._chapters()
+        self.t_ch = max(0, min(self.t_ch, len(chs) - 1)) if chs else 0
+        ch = self._chapter()
+        self.t_segs = self._segments_of(ch["body"]) if ch else []
+        if self.t_seg >= len(self.t_segs):
+            self.t_seg = 0
+
+    # ----- 出题 -----
     def _scoped(self):
         n = dict(SCOPES)[self.scope_name.get()]
         return self.chars if n is None else self.chars[:n]
 
+    def _expected(self):
+        """返回 (双拼码, 当前汉字, 拼音显示)；无内容时 ("", "", "")。"""
+        if not self._is_text_mode():
+            if self.cur is None:
+                return "", "", ""
+            return self.cur["f"], self.cur["c"], self.cur["p"]
+        ch = self._chapter()
+        if ch is None:
+            return "", "", ""
+        s0, s1 = self.t_segs[self.t_seg]
+        i = self.t_pos
+        body = ch["body"]
+        while i < s1 and not HANZI.fullmatch(body[i]):
+            i += 1
+        self.t_pos = i
+        if i >= s1:
+            return "", "", ""
+        pyl = ch["pyl"]
+        ent = pyl[i] if i < len(pyl) else None
+        return (ent[1] if ent else "", body[i], ent[0] if ent else "")
+
+    def _advance_text(self):
+        """推进到下一个待练字；返回 True 表示有效。"""
+        chs = self._chapters()
+        if not chs:
+            return False
+        for _ in range(self.t_total + len(chs) + 2):
+            if self.t_seg >= len(self.t_segs):
+                self.t_ch = (self.t_ch + 1) % len(chs)
+                self._load_segments()
+                self.t_pos = 0
+                self._save_text_pos()
+                continue
+            s0, s1 = self.t_segs[self.t_seg]
+            if self.t_pos < s0:
+                self.t_pos = s0        # 进入新段：从段首起
+            i = self.t_pos
+            body = self._chapter()["body"]
+            while i < s1 and not HANZI.fullmatch(body[i]):
+                i += 1
+            if i < s1:
+                self.t_pos = i
+                return True
+            self.t_seg += 1
+            self.t_pos = 0
+            self._save_text_pos()
+        return False
+
     def _next_char(self, first=False):
-        pool = self._scoped() or self.chars
-        last = None if first or self.cur is None else self.cur["c"]
-        while True:
-            self.cur = random.choice(pool)
-            if last is None or self.cur["c"] != last or len(pool) < 2:
-                break
+        self._cancel_auto()
         self.typed = ""
         self.state = "typing"
-        self.lb_char.configure(text=self.cur["c"])
-        self._toggle_py()
-        self.slot1.configure(text="＿", fg=GREY)
-        self.slot2.configure(text="＿", fg=GREY)
-        self.lb_status.configure(text="输入两键编码", fg=GREY)
+        if self._is_text_mode():
+            if not self._advance_text():
+                self.book = None
+                return self._select_content("chars")
+            self.lb_char.configure(text=self._expected()[1])
+            self._render_segment()
+        else:
+            pool = self._scoped() or self.chars
+            last = None if first or self.cur is None else self.cur["c"]
+            while True:
+                self.cur = random.choice(pool)
+                if last is None or self.cur["c"] != last or len(pool) < 2:
+                    break
+            self.lb_char.configure(text=self.cur["c"])
+        self._refresh_answer()
+        self.slot1.configure(text="＿", fg=self.P["grey"])
+        self.slot2.configure(text="＿", fg=self.P["grey"])
+        self.lb_status.configure(text="输入两键编码", fg=self.P["grey"])
         self._refresh_stats()
         self._highlight_keys()
 
-    def _toggle_py(self):
-        if self.cur is None:
+    def _refresh_answer(self):
+        code, _disp, py = self._expected()
+        if not code:
             return
         if self.show_py.get() or self.state != "typing":
-            self.lb_py.configure(text=self.cur["p"])
+            self.lb_py.configure(text=py)
         else:
             self.lb_py.configure(text="· ·（拼音已隐藏）")
+
+    def _render_segment(self):
+        ch = self._chapter()
+        if ch is None:
+            return
+        s0, s1 = self.t_segs[self.t_seg]
+        t = self.t_text
+        t.configure(state="normal")
+        t.delete("1.0", "end")
+        t.insert("1.0", ch["body"][s0:s1])
+        e = self.t_pos
+        body = ch["body"]
+        for i in range(s0, s1):
+            tag = "done" if i < e else ("cur" if i == e else None)
+            if tag:
+                t.tag_add(tag, f"1.{i - s0}", f"1.{i - s0 + 1}")
+        if e > s0:
+            t.tag_add("done", "1.0", f"1.{min(e, s1) - s0}")
+        t.configure(state="disabled")
+        self._refresh_scope_label()
+
+    def _save_text_pos(self):
+        if self._is_text_mode():
+            self.pos_map[self.content_id] = [self.t_ch, self.t_seg]
+            self._save_store()
 
     def _toggle_kb(self):
         if self.show_kb.get():
@@ -304,85 +613,34 @@ class App(tk.Tk):
             self.kb.grid_remove()
             self.main.grid(row=2, column=0, rowspan=2, sticky="nsew",
                            padx=16, pady=8)
+        self._highlight_keys()
 
     def _highlight_keys(self):
-        self._draw_keyboard()
+        code = self._expected()[0]
+        self._draw_keyboard(code[:1].upper(), code[1:2].upper())
 
-    # ---------- 键盘图（Canvas 圆角键帽，铺满下半区） ----------
-    @staticmethod
-    def _round_pts(x0, y0, x1, y1, r, seg=7):
-        """圆角矩形的平滑多边形顶点"""
-        import math
-        r = max(2, min(r, (x1 - x0) / 2 - 1, (y1 - y0) / 2 - 1))
-        pts = []
-        corners = [(x1 - r, y0 + r, -90), (x1 - r, y1 - r, 0),
-                   (x0 + r, y1 - r, 90), (x0 + r, y0 + r, 180)]
-        for cx, cy, a0 in corners:
-            for t in range(seg + 1):
-                a = math.radians(a0 + 90 * t / seg)
-                pts.extend([cx + r * math.cos(a), cy + r * math.sin(a)])
-        return pts
+    def _expect_pair(self):
+        code = self._expected()[0]
+        return (code[0], code[1]) if len(code) == 2 else ("", "")
 
-    def _draw_keyboard(self, event=None):
-        c = self.kcanvas
-        W, H = c.winfo_width(), c.winfo_height()
-        if W < 60 or H < 50 or self.cur is None:
+    def _give_up(self):
+        c0, c1 = self._expect_pair()
+        if not c0:
             return
-        c.delete("all")
-        self.key_items = {}
-        gap = max(5, int(W * 0.006))
-        vgap = max(5, int(H * 0.045))
-        rows = KB_ROWS
-        key_h = (H - (len(rows) - 1) * vgap) / len(rows)
-        key_h = min(key_h, 130)
-        rad = min(20, key_h * 0.30)
-        f_letter = ("Consolas", max(9, int(key_h * 0.20)), "bold")
-        f_sub = (YA, max(8, int(key_h * 0.135)))
-        k1, k2 = self.cur["f"][0].upper(), self.cur["f"][1].upper()
-        for ri, row in enumerate(rows):
-            n = len(row)
-            kw = (W - (n + 1) * gap) / n
-            y0 = ri * (key_h + vgap)
-            for i, letter in enumerate(row):
-                x0 = gap + i * (kw + gap)
-                x1 = x0 + kw
-                if letter == k1 == k2:
-                    bg, fg, sfg = PURPLE, "#ffffff", "#ffffff"
-                elif letter == k1:
-                    bg, fg, sfg = BLUE, "#ffffff", "#dcebff"
-                elif letter == k2:
-                    bg, fg, sfg = ORANGE, "#ffffff", "#fff0d9"
-                else:
-                    bg, fg, sfg = KEY_BG, FG, GREY
-                poly = c.create_polygon(
-                    *self._round_pts(x0, y0, x0 + kw, y0 + key_h, rad),
-                    smooth=True, fill=bg,
-                    outline=("#c9d4e0" if bg == KEY_BG else bg), width=1)
-                cx = x0 + kw / 2
-                t1 = c.create_text(cx, y0 + key_h * 0.32, text=letter,
-                                   font=f_letter, fill=fg)
-                sub = KB_INFO[letter]
-                if letter in ("U", "I", "V"):
-                    # 声母 sh / ch / zh 用红色醒目标出
-                    left, ini = sub.split("·", 1)
-                    fm = tkfont.Font(font=f_sub)
-                    lw, rw = fm.measure(left), fm.measure(ini)
-                    start = cx - (lw + rw) / 2
-                    ini_c = "#ff9d94" if bg != KEY_BG else RED
-                    t2 = c.create_text(start, y0 + key_h * 0.70, text=left,
-                                       font=f_sub, fill=sfg, anchor="w")
-                    t3 = c.create_text(start + lw, y0 + key_h * 0.70, text=ini,
-                                       font=f_sub, fill=ini_c, anchor="w")
-                    self.key_items[letter] = (poly, t1, t2, t3)
-                else:
-                    t2 = c.create_text(cx, y0 + key_h * 0.70,
-                                       text=sub, font=f_sub, fill=sfg)
-                    self.key_items[letter] = (poly, t1, t2)
-
-    def _on_kb_configure(self, event):
-        if self._kb_draw_job is not None:
-            self.after_cancel(self._kb_draw_job)
-        self._kb_draw_job = self.after(60, self._draw_keyboard)
+        self.answered += 1
+        self.bad += 1
+        self.streak = 0
+        self.cum["practiced"] += 1
+        self.cum["wrong"] += 1
+        self.state = "locked_no"
+        self.slot1.configure(text=c0, fg=self.P["orange"])
+        self.slot2.configure(text=c1, fg=self.P["orange"])
+        self.lb_status.configure(
+            text=f"已跳过 · 正确编码：{c0} {c1}（空格继续）",
+            fg=self.P["grey"])
+        self._refresh_stats()
+        self._save_store()
+        self._auto_next_job = self.after(2600, self._continue)
 
     def on_key(self, event):
         ks = event.keysym
@@ -404,72 +662,83 @@ class App(tk.Tk):
             self.started_at = time.time()
         self.typed += ch
         if len(self.typed) == 1:
-            self.slot1.configure(text=self.typed, fg=BLUE)
+            self.slot1.configure(text=self.typed, fg=self.P["blue"])
         else:
-            self.slot2.configure(text=self.typed[1], fg=ORANGE)
+            self.slot2.configure(text=self.typed[1], fg=self.P["orange"])
             self._judge()
 
     def _judge(self):
-        exp = self.cur["f"]
+        c0, c1 = self._expect_pair()
+        if not c0:
+            return
+        expected = c0 + c1
         self.answered += 1
         self.cum["practiced"] += 1
-        if self.typed == exp:
+        if self.typed == expected:
             self.ok += 1
             self.streak += 1
             self.best = max(self.best, self.streak)
             self.cum["correct"] += 1
             self.state = "locked_ok"
-            self.slot1.configure(text=exp[0], fg=GREEN)
-            self.slot2.configure(text=exp[1], fg=GREEN)
+            self.slot1.configure(text=expected[0], fg=self.P["green"])
+            self.slot2.configure(text=expected[1], fg=self.P["green"])
             msg = "✓ 正确！"
             if self.streak >= 3:
                 msg += f"  连对 {self.streak}"
-            self.lb_status.configure(text=msg, fg=GREEN)
-            self._auto_next_job = self.after(420, self._continue)
+            self.lb_status.configure(text=msg, fg=self.P["green"])
+            self._refresh_stats()
+            self._save_store()
+            self._auto_next_job = self.after(300 if self._is_text_mode()
+                                             else 420, self._continue)
         else:
             self.bad += 1
             self.streak = 0
             self.cum["wrong"] += 1
             self.state = "locked_no"
-            self.slot1.configure(text=self.typed[0], fg=RED)
-            self.slot2.configure(text=self.typed[1], fg=RED)
+            self.slot1.configure(text=self.typed[0], fg=self.P["red"])
+            self.slot2.configure(text=self.typed[1], fg=self.P["red"])
             self.lb_status.configure(
-                text=f"✗ 正确编码：{exp[0]} {exp[1]}（空格继续）", fg=RED)
-            self._toggle_py()
+                text=f"✗ 正确编码：{expected[0]} {expected[1]}（空格继续）",
+                fg=self.P["red"])
+            self._refresh_answer()
+            self._refresh_stats()
+            self._save_store()
             self._auto_next_job = self.after(2600, self._continue)
-        self._refresh_stats()
-        self._save_stats()
-
-    def _give_up(self):
-        exp = self.cur["f"]
-        self.answered += 1
-        self.bad += 1
-        self.streak = 0
-        self.cum["practiced"] += 1
-        self.cum["wrong"] += 1
-        self.state = "locked_no"
-        self.slot1.configure(text=exp[0], fg=ORANGE)
-        self.slot2.configure(text=exp[1], fg=ORANGE)
-        self.lb_status.configure(
-            text=f"已跳过 · 正确编码：{exp[0]} {exp[1]}（空格继续）", fg=GREY)
-        self._refresh_stats()
-        self._save_stats()
-        self._auto_next_job = self.after(2600, self._continue)
 
     def _continue(self):
         if self._auto_next_job is not None:
             self.after_cancel(self._auto_next_job)
             self._auto_next_job = None
+        if self._is_text_mode():
+            self.t_pos += 1
         self._next_char()
 
-    def reset_session(self):
+    def _cancel_auto(self):
         if self._auto_next_job is not None:
             self.after_cancel(self._auto_next_job)
             self._auto_next_job = None
+
+    def reset_session(self, keep_pos=False):
+        self._cancel_auto()
         self.answered = self.ok = self.bad = 0
         self.streak = 0
         self.started_at = None
+        if self._is_text_mode() and not keep_pos:
+            self.t_ch = 0
+            self.t_seg = 0
+            self._load_segments()
+            self.t_pos = 0
+            self._save_text_pos()
         self._next_char()
+
+    def _refresh_scope_label(self):
+        if self._is_text_mode():
+            ch = self._chapter()
+            done = sum(self.t_ch_counts[:self.t_ch]) + self.t_seg + 1
+            self.lb_scope.configure(
+                text=f"{self.book['name']} · {ch['t']} · 第 {done}/{self.t_total} 段")
+        else:
+            self.lb_scope.configure(text=f"词库 {len(self._scoped())} 字")
 
     def _refresh_stats(self):
         acc = self.ok / self.answered * 100 if self.answered else 0
@@ -483,33 +752,129 @@ class App(tk.Tk):
                  f"（最佳 {self.best}）   正确率 {acc:.0f}%   速度 {spd}")
         c = self.cum
         cacc = c["correct"] / c["practiced"] * 100 if c["practiced"] else 0
-        n = dict(SCOPES)[self.scope_name.get()]
-        self.lb_scope.configure(text=f"词库 {len(self._scoped())} 字")
+        self._refresh_scope_label()
         self.lb_cum.configure(
             text=f"累计已练 {c['practiced']} 字 · 正确率 {cacc:.0f}%")
 
     def _tick(self):
         try:
+            # 跟随系统主题：轮询注册表变化
+            if self.theme_mode == "system":
+                dark = sys_prefers_dark()
+                if dark != self._cur_eff_dark:
+                    self._apply_theme()
             self._refresh_stats()
         except tk.TclError:
             return
         self.after(1000, self._tick)
 
+    # ---------- 键盘图（真实 ANSI 布局，圆角键帽） ----------
+    @staticmethod
+    def _round_pts(x0, y0, x1, y1, r, seg=6):
+        """圆角矩形的平滑多边形顶点"""
+        import math
+        r = max(2, min(r, (x1 - x0) / 2 - 1, (y1 - y0) / 2 - 1))
+        pts = []
+        corners = [(x1 - r, y0 + r, -90), (x1 - r, y1 - r, 0),
+                   (x0 + r, y1 - r, 90), (x0 + r, y0 + r, 180)]
+        for cx, cy, a0 in corners:
+            for t in range(seg + 1):
+                a = math.radians(a0 + 90 * t / seg)
+                pts.extend([cx + r * math.cos(a), cy + r * math.sin(a)])
+        return pts
+
+    def _draw_keyboard(self, k1, k2, event=None):
+        c = self.kcanvas
+        P = self.P
+        W, H = c.winfo_width(), c.winfo_height()
+        if W < 60 or H < 50:
+            return
+        c.delete("all")
+        self.key_items = {}
+        pitch = W / KB_UNIT_TOTAL
+        gap = max(2, pitch * 0.04)
+        vgap = max(3, H * 0.018)
+        key_h = min((H - (len(KB_ROWS) - 1) * vgap) / len(KB_ROWS), 120)
+        rad = max(3, key_h * 0.22)
+        f_letter = ("Consolas", max(8, int(key_h * 0.24)), "bold")
+        f_sub = (YA, max(7, int(key_h * 0.15)))
+        f_mod = (YA, max(7, int(key_h * 0.17)))
+        f_alt = ("Consolas", max(7, int(key_h * 0.20)), "bold")
+        y = 0.0
+        for row in KB_ROWS:
+            x = 0.0
+            for label, units in row:
+                x0 = x * pitch + gap
+                x1 = (x + units) * pitch - gap
+                y0, y1 = y, y + key_h
+                letter = (len(label) == 1 and label.isalpha()
+                          and label.isupper())
+                if letter and label == k1 == k2:
+                    bg, fg, sfg = P["purple"], "#ffffff", "#ffffff"
+                elif letter and label == k1:
+                    bg, fg, sfg = P["blue"], "#ffffff", P["hl_sub"]
+                elif letter and label == k2:
+                    bg, fg, sfg = P["orange"], "#ffffff", P["hl_sub"]
+                elif letter:
+                    bg, fg, sfg = P["key_bg"], P["fg"], P["grey"]
+                else:
+                    bg, fg, sfg = P["key_mod"], P["grey"], P["grey"]
+                outline = bg if letter else P["key_border"]
+                c.create_polygon(
+                    *self._round_pts(x0, y0, x1, y1, rad),
+                    smooth=True, fill=bg, outline=outline, width=1)
+                cx = (x0 + x1) / 2
+                if letter:
+                    c.create_text(cx, y0 + key_h * 0.30, text=label,
+                                  font=f_letter, fill=fg)
+                    sub = KB_INFO[label]
+                    if label in ("U", "I", "V"):
+                        # 声母 sh / ch / zh 用红色醒目标出
+                        left, ini = sub.split("·", 1)
+                        fm = tkfont.Font(font=f_sub)
+                        lw, rw = fm.measure(left), fm.measure(ini)
+                        start = cx - (lw + rw) / 2
+                        ini_c = "#ff9d94" if bg != P["key_bg"] else P["red"]
+                        c.create_text(start, y0 + key_h * 0.70, text=left,
+                                      font=f_sub, fill=sfg, anchor="w")
+                        c.create_text(start + lw, y0 + key_h * 0.70, text=ini,
+                                      font=f_sub, fill=ini_c, anchor="w")
+                    else:
+                        c.create_text(cx, y0 + key_h * 0.70, text=sub,
+                                      font=f_sub, fill=sfg)
+                elif label == "空格":
+                    c.create_text(cx, (y0 + y1) / 2, text="空格 · 跳过",
+                                  font=f_mod, fill=fg)
+                else:
+                    c.create_text(cx, (y0 + y1) / 2, text=label,
+                                  font=f_alt if len(label) <= 2 else f_mod,
+                                  fill=fg)
+                x += units
+            y += key_h + vgap
+
+    def _on_kb_configure(self, event):
+        if self._kb_draw_job is not None:
+            self.after_cancel(self._kb_draw_job)
+        self._kb_draw_job = self.after(60, self._highlight_keys)
+
     # ---------- 持久化 / 缩放 ----------
-    def _load_stats(self):
+    def _load_store(self):
         try:
             with open(STATS_FILE, encoding="utf-8") as f:
-                d = json.load(f)
-            return {"practiced": int(d.get("practiced", 0)),
-                    "correct": int(d.get("correct", 0)),
-                    "wrong": int(d.get("wrong", 0))}
+                return json.load(f)
         except Exception:
-            return {"practiced": 0, "correct": 0, "wrong": 0}
+            return {}
 
-    def _save_stats(self):
+    def _save_store(self):
+        data = {"practiced": self.cum["practiced"],
+                "correct": self.cum["correct"],
+                "wrong": self.cum["wrong"],
+                "theme": self.theme_mode,
+                "content": self.content_id,
+                "pos": self.pos_map}
         try:
             with open(STATS_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.cum, f, ensure_ascii=False)
+                json.dump(data, f, ensure_ascii=False)
         except Exception:
             pass
 
@@ -521,7 +886,7 @@ class App(tk.Tk):
         self._resize_job = self.after(120, self._rescale)
 
     def on_close(self):
-        self._save_stats()
+        self._save_store()
         if self._auto_next_job is not None:
             self.after_cancel(self._auto_next_job)
         self.destroy()
