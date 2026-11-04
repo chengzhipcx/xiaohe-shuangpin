@@ -47,12 +47,12 @@ LIGHT = dict(
     select="#ffffff", hl_sub="#dcebff", menu_bg="#ffffff",
 )
 DARK = dict(
-    bg="#15181e", panel="#1e232b", fg="#e8ecf1", grey="#8a97a5",
+    bg="#1e242c", panel="#272e38", fg="#e8ecf1", grey="#97a3b0",
     blue="#3d8bfd", orange="#f5a623", purple="#a06cd5",
     green="#4caf50", red="#e05a52",
-    key_bg="#2a303a", key_mod="#22272f", key_border="#3a424e",
-    ctrl_bg="#2a303a", ctrl_active="#363d49", ctrl_fg="#e8ecf1",
-    select="#3a424e", hl_sub="#bcd9ff", menu_bg="#262b33",
+    key_bg="#303945", key_mod="#262e38", key_border="#3c4654",
+    ctrl_bg="#2c3540", ctrl_active="#3a4452", ctrl_fg="#e8ecf1",
+    select="#3c4654", hl_sub="#bcd9ff", menu_bg="#2b3340",
 )
 
 THEMES = [("跟随系统", "system"), ("浅色", "light"), ("深色", "dark")]
@@ -187,6 +187,7 @@ class App(tk.Tk):
         self._toggle_kb()
         self.update_idletasks()
         self._rescale()
+        self._sync_titlebar()
         self._disable_ime()
 
         self.bind("<Key>", self.on_key)
@@ -294,6 +295,35 @@ class App(tk.Tk):
         return names
 
     # ---------- 主题 ----------
+    def _sync_titlebar(self):
+        """让系统标题栏颜色跟随应用主题（Win11 直接设标题栏色，旧系统退回深色模式开关）"""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            P = self.P
+
+            def colorref(h):
+                r, g, b = (int(h[i:i + 2], 16) for i in (1, 3, 5))
+                return (b << 16) | (g << 8) | r
+
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            if not hwnd:
+                self.after(300, self._sync_titlebar)
+                return
+            dwm = ctypes.windll.dwmapi
+            cap = ctypes.c_int(colorref(P["bg"]))
+            txt = ctypes.c_int(colorref(P["fg"]))
+            bor = ctypes.c_int(colorref(P["bg"]))
+            if dwm.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(cap), 4) != 0:
+                dark = ctypes.c_int(1 if P is DARK else 0)
+                if dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), 4) != 0:
+                    dwm.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(dark), 4)
+            dwm.DwmSetWindowAttribute(hwnd, 36, ctypes.byref(txt), 4)
+            dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(bor), 4)
+        except Exception:
+            pass
+
     def on_theme_change(self, _value):
         self.theme_mode = dict(THEMES)[self.theme_name.get()]
         self._save_store()
@@ -346,6 +376,7 @@ class App(tk.Tk):
         self.lb_rule.configure(bg=P["bg"], fg=P["grey"])
         self.kcanvas.configure(bg=P["bg"])
         self._highlight_keys()
+        self._sync_titlebar()
 
     # ---------- 缩放 ----------
     def _rescale(self):
