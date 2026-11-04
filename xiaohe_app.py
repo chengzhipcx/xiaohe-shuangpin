@@ -170,6 +170,10 @@ class App(tk.Tk):
         self._auto_next_job = None
         self._resize_job = None
         self._cur_eff_dark = None
+        self._pending_key = None     # 答对锁定期间缓存的下一字首键
+        self._store_dirty = False
+        self._just_wrapped = False
+        self.wrong_recent = []       # 本轮答错的字（错字重练，常用字模式）
 
         # 经典文本模式状态
         self.book = None             # 当前书 dict 或 None
@@ -193,6 +197,8 @@ class App(tk.Tk):
         self.bind("<Key>", self.on_key)
         self.bind("<ButtonRelease-1>", lambda e: self.focus_set())
         self.bind("<Configure>", self.on_resize)
+        self.bind("<Control-Right>", lambda e: self._jump_segment(1))
+        self.bind("<Control-Left>", lambda e: self._jump_segment(-1))
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(1000, self._tick)
 
@@ -278,7 +284,6 @@ class App(tk.Tk):
         self.lb_rule.pack(side="bottom", pady=(0, 6))
         self.kcanvas = tk.Canvas(self.kb, highlightthickness=0, bd=0)
         self.kcanvas.pack(fill="both", expand=True)
-        self.key_items = {}          # letter -> item ids
         self._kb_draw_job = None
         self.kcanvas.bind("<Configure>", self._on_kb_configure)
 
@@ -309,7 +314,8 @@ class App(tk.Tk):
 
             hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
             if not hwnd:
-                self.after(300, self._sync_titlebar)
+                if self.winfo_exists():
+                    self.after(300, self._sync_titlebar)
                 return
             dwm = ctypes.windll.dwmapi
             cap = ctypes.c_int(colorref(P["bg"]))
@@ -527,6 +533,14 @@ class App(tk.Tk):
         n = dict(SCOPES)[self.scope_name.get()]
         return self.chars if n is None else self.chars[:n]
 
+    @staticmethod
+    def _typeable(body, i, pyl):
+        """可练字 = 汉字且带有效双拼码（无码字自动跳过，防卡死）"""
+        if not HANZI.fullmatch(body[i]):
+            return False
+        ent = pyl[i] if i < len(pyl) else None
+        return bool(ent) and len(ent[1]) == 2
+
     def _expected(self):
         """返回 (双拼码, 当前汉字, 拼音显示)；无内容时 ("", "", "")。"""
         if not self._is_text_mode():
@@ -539,14 +553,13 @@ class App(tk.Tk):
         s0, s1 = self.t_segs[self.t_seg]
         i = self.t_pos
         body = ch["body"]
-        while i < s1 and not HANZI.fullmatch(body[i]):
+        pyl = ch["pyl"]
+        while i < s1 and not self._typeable(body, i, pyl):
             i += 1
         self.t_pos = i
         if i >= s1:
             return "", "", ""
-        pyl = ch["pyl"]
-        ent = pyl[i] if i < len(pyl) else None
-        return (ent[1] if ent else "", body[i], ent[0] if ent else "")
+        return pyl[i][1], body[i], pyl[i][0]
 
     def _advance_text(self):
         """推进到下一个待练字；返回 True 表示有效。"""
@@ -555,6 +568,8 @@ class App(tk.Tk):
             return False
         for _ in range(self.t_total + len(chs) + 2):
             if self.t_seg >= len(self.t_segs):
+                if self.t_ch >= len(chs) - 1:
+                    self._just_wrapped = True   # 练完最后一章
                 self.t_ch = (self.t_ch + 1) % len(chs)
                 self._load_segments()
                 self.t_pos = 0
@@ -564,8 +579,9 @@ class App(tk.Tk):
             if self.t_pos < s0:
                 self.t_pos = s0        # 进入新段：从段首起
             i = self.t_pos
-            body = self._chapter()["body"]
-            while i < s1 and not HANZI.fullmatch(body[i]):
+            ch = self._chapter()
+            body, pyl = ch["body"], ch["pyl"]
+            while i < s1 and not self._typeable(body, i, pyl):
                 i += 1
             if i < s1:
                 self.t_pos = i
@@ -579,6 +595,7 @@ class App(tk.Tk):
         self._cancel_auto()
         self.typed = ""
         self.state = "typing"
+        status = "输入两键编码"
         if self._is_text_mode():
             if not self._advance_text():
                 self.book = None
@@ -588,17 +605,36 @@ class App(tk.Tk):
         else:
             pool = self._scoped() or self.chars
             last = None if first or self.cur is None else self.cur["c"]
-            while True:
-                self.cur = random.choice(pool)
-                if last is None or self.cur["c"] != last or len(pool) < 2:
-                    break
+            requeue = None
+            if self.wrong_recent and random.random() < 0.35:
+                cand = [c for c in self.wrong_recent[:15] if c["c"] != last]
+                if cand:
+                    requeue = random.choice(cand)
+            if requeue is not None:
+                self.cur = requeue
+                status = "错字重练 · 输入两键编码"
+            else:
+                while True:
+                    self.cur = random.choice(pool)
+                    if last is None or self.cur["c"] != last or len(pool) < 2:
+                        break
             self.lb_char.configure(text=self.cur["c"])
         self._refresh_answer()
         self.slot1.configure(text="＿", fg=self.P["grey"])
         self.slot2.configure(text="＿", fg=self.P["grey"])
-        self.lb_status.configure(text="输入两键编码", fg=self.P["grey"])
+        if self._just_wrapped:
+            self._just_wrapped = False
+            status = "🎉 已练完一轮，从头继续"
+        self.lb_status.configure(text=status, fg=self.P["grey"])
         self._refresh_stats()
         self._highlight_keys()
+        # 补上锁定期间预输入的下一字首键（快速连打不丢键）
+        pk, self._pending_key = self._pending_key, None
+        if pk and self.state == "typing":
+            if self.started_at is None:
+                self.started_at = time.time()
+            self.typed = pk
+            self.slot1.configure(text=pk, fg=self.P["blue"])
 
     def _refresh_answer(self):
         code, _disp, py = self._expected()
@@ -632,7 +668,11 @@ class App(tk.Tk):
     def _save_text_pos(self):
         if self._is_text_mode():
             self.pos_map[self.content_id] = [self.t_ch, self.t_seg]
-            self._save_store()
+            self._mark_dirty()
+
+    def _mark_dirty(self):
+        """练习数据待落盘（由 _tick 每秒统一写一次，避免高速打字时频繁写盘）"""
+        self._store_dirty = True
 
     def _toggle_kb(self):
         if self.show_kb.get():
@@ -654,6 +694,15 @@ class App(tk.Tk):
         code = self._expected()[0]
         return (code[0], code[1]) if len(code) == 2 else ("", "")
 
+    def _remember_wrong(self):
+        """记录答错的字（仅常用字模式，用于错字重练）"""
+        if not self._is_text_mode() and self.cur is not None:
+            c = self.cur
+            if c in self.wrong_recent:
+                self.wrong_recent.remove(c)
+            self.wrong_recent.insert(0, c)
+            del self.wrong_recent[40:]
+
     def _give_up(self):
         c0, c1 = self._expect_pair()
         if not c0:
@@ -663,6 +712,7 @@ class App(tk.Tk):
         self.streak = 0
         self.cum["practiced"] += 1
         self.cum["wrong"] += 1
+        self._remember_wrong()
         self.state = "locked_no"
         self.slot1.configure(text=c0, fg=self.P["orange"])
         self.slot2.configure(text=c1, fg=self.P["orange"])
@@ -670,7 +720,7 @@ class App(tk.Tk):
             text=f"已跳过 · 正确编码：{c0} {c1}（空格继续）",
             fg=self.P["grey"])
         self._refresh_stats()
-        self._save_store()
+        self._mark_dirty()
         self._auto_next_job = self.after(2600, self._continue)
 
     def on_key(self, event):
@@ -685,6 +735,7 @@ class App(tk.Tk):
         if ch not in "abcdefghijklmnopqrstuvwxyz":
             return
         if self.state == "locked_ok":
+            self._pending_key = ch      # 缓存预输入的下一字首键
             return
         if self.state == "locked_no":
             self._continue()
@@ -710,6 +761,8 @@ class App(tk.Tk):
             self.streak += 1
             self.best = max(self.best, self.streak)
             self.cum["correct"] += 1
+            if self.cur in self.wrong_recent:
+                self.wrong_recent.remove(self.cur)   # 重练通过，移出错字表
             self.state = "locked_ok"
             self.slot1.configure(text=expected[0], fg=self.P["green"])
             self.slot2.configure(text=expected[1], fg=self.P["green"])
@@ -718,13 +771,14 @@ class App(tk.Tk):
                 msg += f"  连对 {self.streak}"
             self.lb_status.configure(text=msg, fg=self.P["green"])
             self._refresh_stats()
-            self._save_store()
+            self._mark_dirty()
             self._auto_next_job = self.after(300 if self._is_text_mode()
                                              else 420, self._continue)
         else:
             self.bad += 1
             self.streak = 0
             self.cum["wrong"] += 1
+            self._remember_wrong()
             self.state = "locked_no"
             self.slot1.configure(text=self.typed[0], fg=self.P["red"])
             self.slot2.configure(text=self.typed[1], fg=self.P["red"])
@@ -733,7 +787,7 @@ class App(tk.Tk):
                 fg=self.P["red"])
             self._refresh_answer()
             self._refresh_stats()
-            self._save_store()
+            self._mark_dirty()
             self._auto_next_job = self.after(2600, self._continue)
 
     def _continue(self):
@@ -751,6 +805,8 @@ class App(tk.Tk):
 
     def reset_session(self, keep_pos=False):
         self._cancel_auto()
+        self._pending_key = None
+        self._just_wrapped = False
         self.answered = self.ok = self.bad = 0
         self.streak = 0
         self.started_at = None
@@ -789,6 +845,9 @@ class App(tk.Tk):
 
     def _tick(self):
         try:
+            if self._store_dirty:
+                self._store_dirty = False
+                self._save_store()
             # 跟随系统主题：轮询注册表变化
             if self.theme_mode == "system":
                 dark = sys_prefers_dark()
@@ -796,8 +855,30 @@ class App(tk.Tk):
                     self._apply_theme()
             self._refresh_stats()
         except tk.TclError:
-            return
-        self.after(1000, self._tick)
+            pass    # 瞬时错误不中断心跳链
+        try:
+            self.after(1000, self._tick)
+        except tk.TclError:
+            pass
+
+    def _jump_segment(self, delta):
+        """文本模式 Ctrl+←/→ 跳段（可跨章）"""
+        if not self._is_text_mode():
+            return "break"
+        self._cancel_auto()
+        self.t_seg += delta
+        if self.t_seg < 0:
+            self.t_ch = (self.t_ch - 1) % len(self._chapters())
+            self._load_segments()
+            self.t_seg = max(0, len(self.t_segs) - 1)
+        elif self.t_seg >= len(self.t_segs):
+            self.t_ch = (self.t_ch + 1) % len(self._chapters())
+            self._load_segments()
+            self.t_seg = 0
+        self.t_pos = 0
+        self._save_text_pos()
+        self._next_char()
+        return "break"
 
     # ---------- 键盘图（真实 ANSI 布局，圆角键帽） ----------
     @staticmethod
@@ -814,14 +895,13 @@ class App(tk.Tk):
                 pts.extend([cx + r * math.cos(a), cy + r * math.sin(a)])
         return pts
 
-    def _draw_keyboard(self, k1, k2, event=None):
+    def _draw_keyboard(self, k1, k2):
         c = self.kcanvas
         P = self.P
         W, H = c.winfo_width(), c.winfo_height()
         if W < 60 or H < 50:
             return
         c.delete("all")
-        self.key_items = {}
         pitch = W / KB_UNIT_TOTAL
         gap = max(2, pitch * 0.04)
         vgap = max(3, H * 0.018)
