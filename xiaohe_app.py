@@ -170,10 +170,15 @@ class App(tk.Tk):
         self._auto_next_job = None
         self._resize_job = None
         self._cur_eff_dark = None
-        self._pending_key = None     # 答对锁定期间缓存的下一字首键
+        self._pending_key = ""       # 答对锁定期间缓存的下一字键（最多2键）
         self._store_dirty = False
         self._just_wrapped = False
         self.wrong_recent = []       # 本轮答错的字（错字重练，常用字模式）
+        # 键盘增量重绘状态
+        self._kb_keys = {}           # letter -> (poly, 主文字, 子标注ids)
+        self._kb_size = (0, 0)
+        self._kb_k1k2 = ("", "")
+        self._kb_force = False
 
         # 经典文本模式状态
         self.book = None             # 当前书 dict 或 None
@@ -381,6 +386,7 @@ class App(tk.Tk):
         self.kb.configure(bg=P["bg"])
         self.lb_rule.configure(bg=P["bg"], fg=P["grey"])
         self.kcanvas.configure(bg=P["bg"])
+        self._kb_force = True        # 配色全套变了，键盘需全量重绘
         self._highlight_keys()
         self._sync_titlebar()
 
@@ -422,6 +428,8 @@ class App(tk.Tk):
             for w2 in (self.theme_menu, self.content_menu, self.scope_menu,
                        self.cb_py, self.cb_kb, self.btn_reset):
                 w2.configure(font=fonts["ctrl"][0])
+            for w2 in (self.theme_menu, self.content_menu, self.scope_menu):
+                w2["menu"].configure(font=fonts["ctrl"][0])
             self.t_text.configure(font=fonts["text"][1], spacing1=1)
         except tk.TclError:
             pass
@@ -628,13 +636,12 @@ class App(tk.Tk):
         self.lb_status.configure(text=status, fg=self.P["grey"])
         self._refresh_stats()
         self._highlight_keys()
-        # 补上锁定期间预输入的下一字首键（快速连打不丢键）
-        pk, self._pending_key = self._pending_key, None
-        if pk and self.state == "typing":
-            if self.started_at is None:
-                self.started_at = time.time()
-            self.typed = pk
-            self.slot1.configure(text=pk, fg=self.P["blue"])
+        # 补上锁定期间预输入的键（最多两键，快速连打不丢键）
+        pk, self._pending_key = self._pending_key, ""
+        for ch in pk:
+            if self.state != "typing":
+                break
+            self._apply_letter(ch)
 
     def _refresh_answer(self):
         code, _disp, py = self._expected()
@@ -698,8 +705,44 @@ class App(tk.Tk):
         self._highlight_keys()
 
     def _highlight_keys(self):
+        """更新键位高亮：优先增量重着色，仅在尺寸/主题变化时全量重绘。"""
         code = self._expected()[0]
-        self._draw_keyboard(code[:1].upper(), code[1:2].upper())
+        k1, k2 = code[:1].upper(), code[1:2].upper()
+        c = self.kcanvas
+        size = (c.winfo_width(), c.winfo_height())
+        if self._kb_force or not self._kb_keys or self._kb_size != size:
+            self._kb_force = False
+            self._draw_keyboard(k1, k2)
+            return
+        if (k1, k2) != self._kb_k1k2:
+            for lbl in {self._kb_k1k2[0], self._kb_k1k2[1], k1, k2} - {"", None}:
+                self._kb_apply(lbl, k1, k2)
+            self._kb_k1k2 = (k1, k2)
+
+    def _kb_apply(self, label, k1, k2):
+        """按 (k1, k2) 重着色单个字母键（增量刷新）。"""
+        entry = self._kb_keys.get(label)
+        if not entry:
+            return
+        P = self.P
+        if label == k1 == k2:
+            bg, fg, sfg, hi = P["purple"], "#ffffff", "#ffffff", True
+        elif label == k1:
+            bg, fg, sfg, hi = P["blue"], "#ffffff", P["hl_sub"], True
+        elif label == k2:
+            bg, fg, sfg, hi = P["orange"], "#ffffff", P["hl_sub"], True
+        else:
+            bg, fg, sfg, hi = P["key_bg"], P["fg"], P["grey"], False
+        poly, main_id, subs = entry
+        c = self.kcanvas
+        c.itemconfigure(poly, fill=bg, outline=bg)
+        c.itemconfigure(main_id, fill=fg)
+        if label in ("U", "I", "V"):
+            left_id, ini_id = subs
+            c.itemconfigure(left_id, fill=sfg)
+            c.itemconfigure(ini_id, fill=("#ff9d94" if hi else P["red"]))
+        else:
+            c.itemconfigure(subs[0], fill=sfg)
 
     def _expect_pair(self):
         code = self._expected()[0]
@@ -746,18 +789,22 @@ class App(tk.Tk):
         if ch not in "abcdefghijklmnopqrstuvwxyz":
             return
         if self.state == "locked_ok":
-            self._pending_key = ch      # 缓存预输入的下一字首键
+            self._pending_key = (self._pending_key + ch)[:2]   # 缓存预输入键
             return
         if self.state == "locked_no":
             self._continue()
             return
+        self._apply_letter(ch)
+
+    def _apply_letter(self, ch):
+        """键入一个字母：更新码槽，凑满两键即判定。"""
         if self.started_at is None:
             self.started_at = time.time()
         self.typed += ch
         if len(self.typed) == 1:
-            self.slot1.configure(text=self.typed, fg=self.P["blue"])
+            self.slot1.configure(text=ch, fg=self.P["blue"])
         else:
-            self.slot2.configure(text=self.typed[1], fg=self.P["orange"])
+            self.slot2.configure(text=ch, fg=self.P["orange"])
             self._judge()
 
     def _judge(self):
@@ -816,7 +863,7 @@ class App(tk.Tk):
 
     def reset_session(self, keep_pos=False):
         self._cancel_auto()
-        self._pending_key = None
+        self._pending_key = ""
         self._just_wrapped = False
         self.answered = self.ok = self.bad = 0
         self.streak = 0
@@ -913,6 +960,7 @@ class App(tk.Tk):
         if W < 60 or H < 50:
             return
         c.delete("all")
+        self._kb_keys = {}
         pitch = W / KB_UNIT_TOTAL
         gap = max(2, pitch * 0.04)
         vgap = max(3, H * 0.018)
@@ -942,13 +990,13 @@ class App(tk.Tk):
                 else:
                     bg, fg, sfg = P["key_mod"], P["grey"], P["grey"]
                 outline = bg if letter else P["key_border"]
-                c.create_polygon(
+                poly = c.create_polygon(
                     *self._round_pts(x0, y0, x1, y1, rad),
                     smooth=True, fill=bg, outline=outline, width=1)
                 cx = (x0 + x1) / 2
                 if letter:
-                    c.create_text(cx, y0 + key_h * 0.30, text=label,
-                                  font=f_letter, fill=fg)
+                    main = c.create_text(cx, y0 + key_h * 0.30, text=label,
+                                         font=f_letter, fill=fg)
                     sub = KB_INFO[label]
                     if label in ("U", "I", "V"):
                         # 声母 sh / ch / zh 用红色醒目标出
@@ -957,13 +1005,17 @@ class App(tk.Tk):
                         lw, rw = fm.measure(left), fm.measure(ini)
                         start = cx - (lw + rw) / 2
                         ini_c = "#ff9d94" if bg != P["key_bg"] else P["red"]
-                        c.create_text(start, y0 + key_h * 0.70, text=left,
-                                      font=f_sub, fill=sfg, anchor="w")
-                        c.create_text(start + lw, y0 + key_h * 0.70, text=ini,
-                                      font=f_sub, fill=ini_c, anchor="w")
+                        left_id = c.create_text(start, y0 + key_h * 0.70,
+                                                text=left, font=f_sub,
+                                                fill=sfg, anchor="w")
+                        ini_id = c.create_text(start + lw, y0 + key_h * 0.70,
+                                               text=ini, font=f_sub,
+                                               fill=ini_c, anchor="w")
+                        self._kb_keys[label] = (poly, main, (left_id, ini_id))
                     else:
-                        c.create_text(cx, y0 + key_h * 0.70, text=sub,
-                                      font=f_sub, fill=sfg)
+                        sub_id = c.create_text(cx, y0 + key_h * 0.70, text=sub,
+                                               font=f_sub, fill=sfg)
+                        self._kb_keys[label] = (poly, main, (sub_id,))
                 elif label == "空格":
                     c.create_text(cx, (y0 + y1) / 2, text="空格 · 跳过",
                                   font=f_mod, fill=fg)
@@ -973,6 +1025,9 @@ class App(tk.Tk):
                                   fill=fg)
                 x += units
             y += key_h + vgap
+        self._kb_size = (W, H)
+        self._kb_k1k2 = (k1, k2)
+        self._kb_force = False
 
     def _on_kb_configure(self, event):
         if self._kb_draw_job is not None:
@@ -995,8 +1050,11 @@ class App(tk.Tk):
                 "content": self.content_id,
                 "pos": self.pos_map}
         try:
-            with open(STATS_FILE, "w", encoding="utf-8") as f:
+            # 原子写：防中途崩溃损坏 stats.json
+            tmp = STATS_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, STATS_FILE)
         except Exception:
             pass
 
@@ -1009,8 +1067,13 @@ class App(tk.Tk):
 
     def on_close(self):
         self._save_store()
-        if self._auto_next_job is not None:
-            self.after_cancel(self._auto_next_job)
+        for job in (self._auto_next_job, self._kb_draw_job,
+                    self._resize_job):
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
         self.destroy()
 
 
