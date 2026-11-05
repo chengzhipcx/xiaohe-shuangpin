@@ -570,6 +570,7 @@ class App(tk.Tk):
                 if self.t_ch >= len(chs) - 1:
                     self._just_wrapped = True   # 练完最后一章
                 self.t_ch = (self.t_ch + 1) % len(chs)
+                self.t_seg = 0                  # 跨章：段号归零（勿残留上一章段号）
                 self._load_segments()
                 self.t_pos = 0
                 self._save_text_pos()
