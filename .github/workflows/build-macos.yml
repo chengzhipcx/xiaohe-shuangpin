@@ -36,16 +36,16 @@ jobs:
           mkdir -p dist/dmg
           cp -R "dist/小鹤双拼练习.app" dist/dmg/
           ln -s /Applications dist/dmg/Applications
-          hdiutil create -volname "小鹤双拼练习" -srcfolder dist/dmg -ov -format UDZO "dist/小鹤双拼练习-macOS.dmg"
+          hdiutil create -volname "小鹤双拼练习" -srcfolder dist/dmg -ov -format UDZO "dist/XiaoheShuangpin-${{ github.ref_name }}-macOS.dmg"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: XiaoheShuangpin-macOS-dmg
-          path: dist/小鹤双拼练习-macOS.dmg
+          path: dist/XiaoheShuangpin-${{ github.ref_name }}-macOS.dmg
 
       - name: 发布到 Releases（仅 tag 触发）
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/小鹤双拼练习-macOS.dmg
+          files: dist/XiaoheShuangpin-${{ github.ref_name }}-macOS.dmg
