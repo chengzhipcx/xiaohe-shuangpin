@@ -70,6 +70,17 @@ Windows 桌面小程序（Python 标准库 tkinter，无任何第三方运行依
   重新生成：`uv run --with pypinyin python gen_texts.py`
 - 拼音：pypinyin（多音字取最常见读音，界面显示的拼音与期望编码始终一致）
 
+## macOS 安装包
+
+仓库内置 GitHub Actions（`.github/workflows/build-macos.yml`）：
+**推送 tag（如 `v1.1.0`）或在 Actions 页面手动 Run workflow**，即在 macOS 上自动打包
+`小鹤双拼练习-macOS.dmg`——tag 构建自动发布到 Releases，手动构建在 Actions 页面下载 artifact。
+
+- 未签名应用首次打开：右键 →「打开」，或 `xattr -cr /Applications/小鹤双拼练习.app`
+- 界面字体自动切换为苹方/Menlo；练习进度存于 `~/.xiaohe-shuangpin/stats.json`
+- 本地构建（需在 mac 上）：
+  `pip install pyinstaller && pyinstaller --windowed --name 小鹤双拼练习 --icon app.icns --add-data "xiaohe_data.json:." --add-data "texts.json:." xiaohe_app.py`
+
 ## 打包为独立 exe（可选）
 
 ```bash

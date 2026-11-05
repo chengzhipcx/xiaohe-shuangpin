@@ -1,0 +1,51 @@
+name: 构建安装包
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS dmg
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装 PyInstaller
+        run: pip install pyinstaller
+
+      - name: 打包 .app
+        run: >
+          pyinstaller --windowed --clean --noconfirm
+          --name "小鹤双拼练习"
+          --icon app.icns
+          --add-data "xiaohe_data.json:."
+          --add-data "texts.json:."
+          xiaohe_app.py
+
+      - name: 制作 DMG
+        run: |
+          mkdir -p dist/dmg
+          cp -R "dist/小鹤双拼练习.app" dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname "小鹤双拼练习" -srcfolder dist/dmg -ov -format UDZO "dist/小鹤双拼练习-macOS.dmg"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: XiaoheShuangpin-macOS-dmg
+          path: dist/小鹤双拼练习-macOS.dmg
+
+      - name: 发布到 Releases（仅 tag 触发）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/小鹤双拼练习-macOS.dmg

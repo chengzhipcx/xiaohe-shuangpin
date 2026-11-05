@@ -103,6 +103,16 @@ def main():
     master.save(ICO_PATH, sizes=[(S, S) for S in SIZES],
                 append_images=[frames[S] for S in SIZES if S != 256])
 
+    # macOS 用 icns（PyInstaller mac 打包只认 icns）
+    ICNS_SIZES = [16, 32, 64, 128, 256, 512, 1024]
+    icns_frames = {S: draw(S) for S in ICNS_SIZES}
+    icns_path = os.path.join(HERE, "app.icns")
+    icns_frames[1024].save(
+        icns_path, sizes=[(S, S) for S in ICNS_SIZES],
+        append_images=[icns_frames[S] for S in ICNS_SIZES if S != 1024])
+    with Image.open(icns_path) as im:
+        print("icns 帧数:", len(im.info.get("sizes", [])))
+
     # 预览图：小尺寸按 4 倍最近邻放大，直观看清晰度
     pad = 8
     shown = [16, 20, 24, 32, 48, 64]

@@ -30,12 +30,22 @@ else:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     _RES_DIR = _BASE_DIR
 APP_DIR = _BASE_DIR
+if sys.platform != "win32" and getattr(sys, "frozen", False):
+    # mac .app / Linux 二进制所在目录通常不可写：统计与设置放用户目录
+    APP_DIR = os.path.join(os.path.expanduser("~"), ".xiaohe-shuangpin")
+    os.makedirs(APP_DIR, exist_ok=True)
 DATA_FILE = os.path.join(_RES_DIR, "xiaohe_data.json")
 TEXTS_FILE = os.path.join(_RES_DIR, "texts.json")
 ICON_FILE = os.path.join(_RES_DIR, "app.ico")
 STATS_FILE = os.path.join(APP_DIR, "stats.json")
 
-YA = "Microsoft YaHei UI"
+# 跨平台字体：中文界面字体 + 等宽编码字体
+if sys.platform == "darwin":
+    YA, MONO = "PingFang SC", "Menlo"
+elif sys.platform == "win32":
+    YA, MONO = "Microsoft YaHei UI", "Consolas"
+else:
+    YA, MONO = "Noto Sans CJK SC", "DejaVu Sans Mono"
 
 # ---------- 主题调色板 ----------
 LIGHT = dict(
@@ -403,8 +413,8 @@ class App(tk.Tk):
                           (YA, max(15, int(44 * s)), "bold")),
             "py": ((YA, 28), (YA, max(13, int(28 * s)))),
             "py_text": ((YA, 16), (YA, max(9, int(16 * s)))),
-            "slot": (("Consolas", 40, "bold"),
-                     ("Consolas", max(15, int(40 * s)), "bold")),
+            "slot": ((MONO, 40, "bold"),
+                     (MONO, max(15, int(40 * s)), "bold")),
             "status": ((YA, 16), (YA, max(11, int(16 * s)))),
             "rule": ((YA, 11), (YA, max(9, int(11 * s)))),
             "ctrl": ((YA, 11), (YA, max(10, int(11 * s)))),
@@ -966,10 +976,10 @@ class App(tk.Tk):
         vgap = max(3, H * 0.018)
         key_h = min((H - (len(KB_ROWS) - 1) * vgap) / len(KB_ROWS), 120)
         rad = max(3, key_h * 0.22)
-        f_letter = ("Consolas", max(8, int(key_h * 0.24)), "bold")
+        f_letter = (MONO, max(8, int(key_h * 0.24)), "bold")
         f_sub = (YA, max(7, int(key_h * 0.15)))
         f_mod = (YA, max(7, int(key_h * 0.17)))
-        f_alt = ("Consolas", max(7, int(key_h * 0.20)), "bold")
+        f_alt = (MONO, max(7, int(key_h * 0.20)), "bold")
         y = 0.0
         for row in KB_ROWS:
             x = 0.0
