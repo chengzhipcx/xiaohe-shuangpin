@@ -21,8 +21,8 @@ jobs:
             label: arm64
             asset: macOS-arm64
             artifact: macOS-arm64
-          # Intel
-          - os: macos-13
+          # Intel（macos-15-intel 为 Rosetta 运行的 x86_64，产出可原生跑在 Intel Mac）
+          - os: macos-15-intel
             label: Intel
             asset: macOS-Intel
             artifact: macOS-Intel
