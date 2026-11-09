@@ -132,6 +132,15 @@ pyinstaller --onefile --noconsole --icon=app.ico --name 小鹤双拼练习 ^
 - **稳健性**：`stats.json` 原子写（临时文件 + `os.replace`）；答对锁定期间缓存两键，快速连打不丢键
 - **图标**：16–1024 多尺寸各自独立绘制（小尺寸自动省略细描边、放大主字形），非母版缩放
 
+## 关于作者
+
+- 个人网站：[codercheng.xyz](https://codercheng.xyz)
+- 微信公众号：**coder程**（微信搜一搜，或扫码关注）
+
+<p align="center">
+  <img src="wechat-codercheng.png" width="560" alt="微信公众号：coder程">
+</p>
+
 ## License
 
 [MIT](LICENSE)
