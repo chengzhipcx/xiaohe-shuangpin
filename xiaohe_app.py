@@ -9,8 +9,10 @@
         ao=C ui=V in=B ian=M
   零声母：韵母首字母 + 韵母键（爱 ai→ad、恩 en→ef），er 例外→er
 
-内容：常用 2000 字随机练习，或《道德经》/四书五经整段打字（texts.json）。
+内容：常用 2000 字随机练习、错字练习（错题本，跨会话保存），
+      或《道德经》/《弟子规》/四书五经整段打字（texts.json）。
 主题：跟随系统 / 浅色 / 深色（设置保存在 stats.json）。
+暂停：Ctrl+P 或按钮暂停休息，计时冻结、按键屏蔽，任意键继续。
 """
 import json
 import os
@@ -55,6 +57,7 @@ LIGHT = dict(
     key_bg="#ffffff", key_mod="#eef2f6", key_border="#cfd8e2",
     ctrl_bg="#e2e8f0", ctrl_active="#d3dce6", ctrl_fg="#22303f",
     select="#ffffff", hl_sub="#dcebff", menu_bg="#ffffff",
+    ok_bg="#e2f5e9", bad_bg="#fde9e7",
 )
 DARK = dict(
     bg="#1e242c", panel="#272e38", fg="#e8ecf1", grey="#97a3b0",
@@ -63,6 +66,7 @@ DARK = dict(
     key_bg="#303945", key_mod="#262e38", key_border="#3c4654",
     ctrl_bg="#2c3540", ctrl_active="#3a4452", ctrl_fg="#e8ecf1",
     select="#3c4654", hl_sub="#bcd9ff", menu_bg="#2b3340",
+    ok_bg="#1d3d2b", bad_bg="#4d2622",
 )
 
 THEMES = [("跟随系统", "system"), ("浅色", "light"), ("深色", "dark")]
@@ -94,6 +98,7 @@ HANZI = re.compile(r"[\u3400-\u9fff]")
 PUNCT = "，。？！；：、·—…《》〈〉（）"
 
 SEG_LIMIT = 16          # 段内最多汉字数
+WRONG_CAP = 80          # 错字本上限（保留最近答错的）
 
 
 def sys_prefers_dark():
@@ -144,6 +149,7 @@ class App(tk.Tk):
 
         with open(DATA_FILE, encoding="utf-8") as f:
             self.chars = json.load(f)
+        self._char_map = {c["c"]: c for c in self.chars}
         self.books = []
         try:
             with open(TEXTS_FILE, encoding="utf-8") as f:
@@ -172,6 +178,9 @@ class App(tk.Tk):
         self.cur = None
         self.state = "typing"        # typing / locked_ok / locked_no
         self.started_at = None       # 首次输入时间（计速起点）
+        self.paused_at = None        # 暂停时刻（None = 未暂停）
+        self.paused_total = 0.0      # 本轮累计暂停时长（不计入速度）
+        self._status_size = 16       # 状态栏字号（_rescale 时更新）
         self.answered = 0
         self.ok = 0
         self.bad = 0
@@ -183,7 +192,11 @@ class App(tk.Tk):
         self._pending_key = ""       # 答对锁定期间缓存的下一字键（最多2键）
         self._store_dirty = False
         self._just_wrapped = False
-        self.wrong_recent = []       # 本轮答错的字（错字重练，常用字模式）
+        self.wrong_recent = [        # 错字本（跨会话，两种模式都记）
+            self._char_map[h] for h in store.get("wrong_chars", [])
+            if h in self._char_map][:WRONG_CAP]
+        self._flash_job = None       # 对/错底色闪烁定时器
+        self._zero_job = None        # 错字清零后回常用字的定时器
         # 键盘增量重绘状态
         self._kb_keys = {}           # letter -> (poly, 主文字, 子标注ids)
         self._kb_size = (0, 0)
@@ -214,6 +227,7 @@ class App(tk.Tk):
         self.bind("<Configure>", self.on_resize)
         self.bind("<Control-Right>", lambda e: self._jump_segment(1))
         self.bind("<Control-Left>", lambda e: self._jump_segment(-1))
+        self.bind("<Control-p>", lambda e: self.toggle_pause())
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(1000, self._tick)
 
@@ -253,6 +267,9 @@ class App(tk.Tk):
                                     variable=self.show_kb,
                                     command=self._toggle_kb, takefocus=0)
         self.cb_kb.pack(side="left", padx=4)
+        self.btn_pause = tk.Button(right, text="暂停", command=self.toggle_pause,
+                                   relief="flat", takefocus=0, padx=12)
+        self.btn_pause.pack(side="left", padx=(10, 0))
         self.btn_reset = tk.Button(right, text="重新开始",
                                    command=self.reset_session,
                                    relief="flat", takefocus=0, padx=12)
@@ -278,24 +295,26 @@ class App(tk.Tk):
         self.t_text.tag_configure("cur")
         self.t_text.tag_configure("todo")
         self.lb_char = tk.Label(self.main)
-        self.lb_char.pack(expand=True)
         self.lb_py = tk.Label(self.main)
-        self.lb_py.pack()
         slots = tk.Frame(self.main)
-        slots.pack(pady=(2, 0))
         self.slots = slots
         self.slot1 = tk.Label(slots, text="＿")
         self.slot1.pack(side="left", padx=8)
         self.slot2 = tk.Label(slots, text="＿")
         self.slot2.pack(side="left", padx=8)
         self.lb_status = tk.Label(self.main)
-        self.lb_status.pack(pady=(0, 0))
+        # 先从底部固定状态行 / 码槽 / 拼音，剩余空间全给大字：
+        # 保证判定后加粗放大的状态行不被窗口高度裁剪
+        self.lb_status.pack(side="bottom", pady=(0, 2))
+        slots.pack(side="bottom", pady=(4, 2))
+        self.lb_py.pack(side="bottom")
+        self.lb_char.pack(expand=True, fill="both")
 
         self.kb = tk.Frame(self)
         self.kb.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 12))
         self.lb_rule = tk.Label(
             self.kb, justify="center",
-            text="声母 zh→V ch→I sh→U ｜ 零声母 = 韵母首字母 + 韵母键（爱 ai→ad）｜ er 除外 ｜ 空格跳过")
+            text="声母 zh→V ch→I sh→U ｜ 零声母 = 韵母首字母 + 韵母键（爱 ai→ad）｜ er 除外 ｜ 空格跳过 ｜ Ctrl+P 暂停")
         self.lb_rule.pack(side="bottom", pady=(0, 6))
         self.kcanvas = tk.Canvas(self.kb, highlightthickness=0, bd=0)
         self.kcanvas.pack(fill="both", expand=True)
@@ -309,7 +328,7 @@ class App(tk.Tk):
         return m
 
     def _content_names(self):
-        names = ["常用 2000 字"]
+        names = ["常用 2000 字", "错字练习"]
         names += [b["name"] + ("（选）" if b.get("select") else "")
                   for b in self.books]
         return names
@@ -378,9 +397,10 @@ class App(tk.Tk):
         for cb in (self.cb_py, self.cb_kb):
             cb.configure(bg=P["bg"], fg=P["fg"], activebackground=P["bg"],
                          selectcolor=P["select"])
-        self.btn_reset.configure(bg=P["ctrl_bg"], fg=P["ctrl_fg"],
-                                 activebackground=P["ctrl_active"],
-                                 activeforeground=P["ctrl_fg"])
+        for w in (self.btn_pause, self.btn_reset):
+            w.configure(bg=P["ctrl_bg"], fg=P["ctrl_fg"],
+                        activebackground=P["ctrl_active"],
+                        activeforeground=P["ctrl_fg"])
         self.main.configure(bg=P["panel"])
         self.t_text.configure(bg=P["panel"], fg=P["fg"],
                               insertbackground=P["fg"])
@@ -420,6 +440,7 @@ class App(tk.Tk):
             "ctrl": ((YA, 11), (YA, max(10, int(11 * s)))),
             "text": ((YA, 20), (YA, max(11, int(20 * s)))),
         }
+        self._status_size = max(11, int(16 * s))
         try:
             self.lb_title.configure(font=fonts["title"][1])
             self.lb_stats.configure(font=fonts["stats"][1])
@@ -436,7 +457,7 @@ class App(tk.Tk):
             self.lb_status.configure(font=fonts["status"][1])
             self.lb_rule.configure(font=fonts["rule"][0])
             for w2 in (self.theme_menu, self.content_menu, self.scope_menu,
-                       self.cb_py, self.cb_kb, self.btn_reset):
+                       self.cb_py, self.cb_kb, self.btn_pause, self.btn_reset):
                 w2.configure(font=fonts["ctrl"][0])
             for w2 in (self.theme_menu, self.content_menu, self.scope_menu):
                 w2["menu"].configure(font=fonts["ctrl"][0])
@@ -476,6 +497,22 @@ class App(tk.Tk):
         return self.book is not None
 
     def _select_content(self, cid, restore=False):
+        if self._zero_job is not None:
+            self.after_cancel(self._zero_job)
+            self._zero_job = None
+        if cid == "wrong":
+            if restore and not self.wrong_recent:
+                cid = "chars"      # 错字本为空：启动时不落在空模式
+            else:
+                self.book = None
+                self.content_id = "wrong"
+                self.content_name.set("错字练习")
+                self.scope_menu.pack_forget()
+                self.t_text.pack_forget()
+                self._save_store()
+                self._rescale()
+                self.reset_session()
+                return
         self.book = next((b for b in self.books
                           if b["id"] == cid and b.get("chapters")), None)
         self.content_id = cid if self.book else "chars"
@@ -501,6 +538,9 @@ class App(tk.Tk):
         self.reset_session(keep_pos=restore)
 
     def on_content_change(self, value):
+        if value == "错字练习":
+            self._select_content("wrong")
+            return
         name = value.replace("（选）", "")
         cid = next((b["id"] for b in self.books if b["name"] == name),
                    "chars")
@@ -611,6 +651,7 @@ class App(tk.Tk):
 
     def _next_char(self, first=False):
         self._cancel_auto()
+        self._stop_flash()
         self.typed = ""
         self.state = "typing"
         status = "输入两键编码"
@@ -618,32 +659,53 @@ class App(tk.Tk):
             if not self._advance_text():
                 self.book = None
                 return self._select_content("chars")
-            self.lb_char.configure(text=self._expected()[1])
+            self.lb_char.configure(text=self._expected()[1],
+                                   fg=self.P["fg"])
             self._render_segment()
         else:
-            pool = self._scoped() or self.chars
             last = None if first or self.cur is None else self.cur["c"]
-            requeue = None
-            if self.wrong_recent and random.random() < 0.35:
-                cand = [c for c in self.wrong_recent[:15] if c["c"] != last]
-                if cand:
-                    requeue = random.choice(cand)
-            if requeue is not None:
-                self.cur = requeue
-                status = "错字重练 · 输入两键编码"
-            else:
+            if self.content_id == "wrong":
+                if not self.wrong_recent:
+                    self.cur = None
+                    self.lb_char.configure(text="🎉", fg=self.P["fg"])
+                    self.lb_py.configure(text="错字本已清空")
+                    self.lb_status.configure(
+                        text="🎉 错字全部练对了！稍后回到常用字练习",
+                        fg=self.P["green"])
+                    if self._zero_job is None:
+                        self._zero_job = self.after(
+                            1800, lambda: self._select_content("chars"))
+                    return
+                pool = self.wrong_recent
                 while True:
                     self.cur = random.choice(pool)
                     if last is None or self.cur["c"] != last or len(pool) < 2:
                         break
-            self.lb_char.configure(text=self.cur["c"])
+            else:
+                pool = self._scoped() or self.chars
+                requeue = None
+                if self.wrong_recent and random.random() < 0.35:
+                    cand = [c for c in self.wrong_recent[:15]
+                            if c["c"] != last]
+                    if cand:
+                        requeue = random.choice(cand)
+                if requeue is not None:
+                    self.cur = requeue
+                    status = "错字重练 · 输入两键编码"
+                else:
+                    while True:
+                        self.cur = random.choice(pool)
+                        if last is None or self.cur["c"] != last or len(pool) < 2:
+                            break
+            self.lb_char.configure(text=self.cur["c"], fg=self.P["fg"])
         self._refresh_answer()
         self.slot1.configure(text="＿", fg=self.P["grey"])
         self.slot2.configure(text="＿", fg=self.P["grey"])
         if self._just_wrapped:
             self._just_wrapped = False
             status = "🎉 已练完一轮，从头继续"
-        self.lb_status.configure(text=status, fg=self.P["grey"])
+        self.lb_status.configure(text=status, fg=self.P["grey"],
+                                 font=(YA, self._status_size))
         self._refresh_stats()
         self._highlight_keys()
         # 补上锁定期间预输入的键（最多两键，快速连打不丢键）
@@ -759,13 +821,17 @@ class App(tk.Tk):
         return (code[0], code[1]) if len(code) == 2 else ("", "")
 
     def _remember_wrong(self):
-        """记录答错的字（仅常用字模式，用于错字重练）"""
-        if not self._is_text_mode() and self.cur is not None:
+        """记录答错的字（两种模式都记，供错字练习与错字重练）"""
+        if self._is_text_mode():
+            c = self._char_map.get(self._expected()[1])
+        else:
             c = self.cur
-            if c in self.wrong_recent:
-                self.wrong_recent.remove(c)
-            self.wrong_recent.insert(0, c)
-            del self.wrong_recent[40:]
+        if c is None:
+            return
+        if c in self.wrong_recent:
+            self.wrong_recent.remove(c)
+        self.wrong_recent.insert(0, c)
+        del self.wrong_recent[WRONG_CAP:]
 
     def _give_up(self):
         c0, c1 = self._expect_pair()
@@ -789,6 +855,9 @@ class App(tk.Tk):
 
     def on_key(self, event):
         ks = event.keysym
+        if self.paused_at is not None:       # 暂停中：任意键自动继续
+            self.toggle_pause()
+            return "break"
         if ks in ("space", "Return", "KP_Enter"):
             if self.state == "typing":
                 self._give_up()
@@ -829,8 +898,12 @@ class App(tk.Tk):
             self.streak += 1
             self.best = max(self.best, self.streak)
             self.cum["correct"] += 1
-            if self.cur in self.wrong_recent:
-                self.wrong_recent.remove(self.cur)   # 重练通过，移出错字表
+            if self._is_text_mode():
+                ent = self._char_map.get(self._expected()[1])
+            else:
+                ent = self.cur
+            if ent in self.wrong_recent:
+                self.wrong_recent.remove(ent)   # 答对即移出错字本
             self.state = "locked_ok"
             self.slot1.configure(text=expected[0], fg=self.P["green"])
             self.slot2.configure(text=expected[1], fg=self.P["green"])
@@ -838,6 +911,7 @@ class App(tk.Tk):
             if self.streak >= 3:
                 msg += f"  连对 {self.streak}"
             self.lb_status.configure(text=msg, fg=self.P["green"])
+            self._flash(True)
             self._refresh_stats()
             self._mark_dirty()
             self._auto_next_job = self.after(300 if self._is_text_mode()
@@ -853,6 +927,7 @@ class App(tk.Tk):
             self.lb_status.configure(
                 text=f"✗ 正确编码：{expected[0]} {expected[1]}（空格继续）",
                 fg=self.P["red"])
+            self._flash(False)
             self._refresh_answer()
             self._refresh_stats()
             self._mark_dirty()
@@ -871,8 +946,70 @@ class App(tk.Tk):
             self.after_cancel(self._auto_next_job)
             self._auto_next_job = None
 
+    # ----- 暂停 / 继续：休息期间冻结计时、屏蔽打字 -----
+    def _elapsed(self):
+        """本轮有效练习时长（扣除暂停），秒。"""
+        if self.started_at is None:
+            return 0.0
+        end = self.paused_at if self.paused_at is not None else time.time()
+        return max(0.0, end - self.started_at - self.paused_total)
+
+    def toggle_pause(self):
+        if self.paused_at is not None:      # 继续
+            self.paused_total += time.time() - self.paused_at
+            self.paused_at = None
+            self.btn_pause.configure(text="暂停")
+            if self.state == "typing":
+                self.lb_status.configure(
+                    text="输入两键编码", fg=self.P["grey"],
+                    font=(YA, self._status_size))
+            else:                            # 暂停时冻结的判定，恢复后补上下一字
+                self._continue()
+        else:                                # 暂停
+            self.paused_at = time.time()
+            self._cancel_auto()              # 自动下一字也一并冻结
+            self.btn_pause.configure(text="继续")
+            self.lb_status.configure(
+                text="⏸ 已暂停 · 休息一下，按任意键或点「继续」接着练",
+                fg=self.P["orange"], font=(YA, self._status_size))
+
+    # ----- 对/错视觉反馈：面板底色闪烁 + 大字变色 + 状态加粗放大 -----
+    def _flash(self, ok):
+        P = self.P
+        color = P["ok_bg"] if ok else P["bad_bg"]
+        fg = P["green"] if ok else P["red"]
+        for w in (self.main, self.t_text, self.lb_char, self.lb_py,
+                  self.slots, self.slot1, self.slot2, self.lb_status):
+            try:
+                w.configure(bg=color)
+            except tk.TclError:
+                pass
+        self.lb_char.configure(fg=fg)
+        size = max(13, int(self._status_size * 1.35))
+        self.lb_status.configure(font=(YA, size, "bold"))
+        if self._flash_job is not None:
+            self.after_cancel(self._flash_job)
+        self._flash_job = self.after(300 if ok else 550, self._stop_flash)
+
+    def _stop_flash(self):
+        self._flash_job = None
+        P = self.P
+        for w in (self.main, self.t_text, self.lb_char, self.lb_py,
+                  self.slots, self.slot1, self.slot2, self.lb_status):
+            try:
+                w.configure(bg=P["panel"])
+            except tk.TclError:
+                pass
+
     def reset_session(self, keep_pos=False):
         self._cancel_auto()
+        if self._zero_job is not None:
+            self.after_cancel(self._zero_job)
+            self._zero_job = None
+        if self.paused_at is not None:       # 新一轮直接回到未暂停态
+            self.paused_at = None
+            self.btn_pause.configure(text="暂停")
+        self.paused_total = 0.0
         self._pending_key = ""
         self._just_wrapped = False
         self.answered = self.ok = self.bad = 0
@@ -892,6 +1029,10 @@ class App(tk.Tk):
             done = sum(self.t_ch_counts[:self.t_ch]) + self.t_seg + 1
             self.lb_scope.configure(
                 text=f"{self.book['name']} · {ch['t']} · 第 {done}/{self.t_total} 段")
+        elif self.content_id == "wrong":
+            n = len(self.wrong_recent)
+            self.lb_scope.configure(
+                text=f"错字本 {n} 字 · 答对一个移出一个")
         else:
             self.lb_scope.configure(text=f"词库 {len(self._scoped())} 字")
 
@@ -899,7 +1040,7 @@ class App(tk.Tk):
         acc = self.ok / self.answered * 100 if self.answered else 0
         spd = "—"
         if self.started_at and self.answered:
-            sec = time.time() - self.started_at
+            sec = self._elapsed()
             if sec > 8:
                 spd = f"{self.answered / (sec / 60):.0f} 字/分"
         self.lb_stats.configure(
@@ -1058,7 +1199,8 @@ class App(tk.Tk):
                 "wrong": self.cum["wrong"],
                 "theme": self.theme_mode,
                 "content": self.content_id,
-                "pos": self.pos_map}
+                "pos": self.pos_map,
+                "wrong_chars": [e["c"] for e in self.wrong_recent]}
         try:
             # 原子写：防中途崩溃损坏 stats.json
             tmp = STATS_FILE + ".tmp"
@@ -1078,7 +1220,7 @@ class App(tk.Tk):
     def on_close(self):
         self._save_store()
         for job in (self._auto_next_job, self._kb_draw_job,
-                    self._resize_job):
+                    self._resize_job, self._flash_job, self._zero_job):
             if job is not None:
                 try:
                     self.after_cancel(job)
