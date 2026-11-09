@@ -9,10 +9,11 @@
         ao=C ui=V in=B ian=M
   零声母：韵母首字母 + 韵母键（爱 ai→ad、恩 en→ef），er 例外→er
 
-内容：常用 2000 字随机练习、错字练习（错题本，跨会话保存），
+内容：常用 2000 字随机练习、错字练习（错题本）、自定义文本（粘贴/导入），
       或《道德经》/《弟子规》/四书五经整段打字（texts.json）。
-主题：跟随系统 / 浅色 / 深色（设置保存在 stats.json）。
+主题：跟随系统 / 浅色 / 深色；打字音效可开关（音效勾选框）。
 暂停：Ctrl+P 或按钮暂停休息，计时冻结、按键屏蔽，任意键继续。
+挑战：统计栏「60 秒挑战」限时测速，结束出成绩单；历史按钮看打卡曲线。
 """
 import json
 import os
@@ -40,6 +41,7 @@ DATA_FILE = os.path.join(_RES_DIR, "xiaohe_data.json")
 TEXTS_FILE = os.path.join(_RES_DIR, "texts.json")
 ICON_FILE = os.path.join(_RES_DIR, "app.ico")
 STATS_FILE = os.path.join(APP_DIR, "stats.json")
+CUSTOM_FILE = os.path.join(APP_DIR, "custom_text.txt")
 
 # 跨平台字体：中文界面字体 + 等宽编码字体
 if sys.platform == "darwin":
@@ -99,6 +101,39 @@ PUNCT = "，。？！；：、·—…《》〈〉（）"
 
 SEG_LIMIT = 16          # 段内最多汉字数
 WRONG_CAP = 80          # 错字本上限（保留最近答错的）
+CHALLENGE_SECS = 60     # 限时挑战时长（秒）
+HISTORY_KEEP = 400      # 每日统计保留天数
+
+
+# ---------- 打字音效：运行时合成 wav（无音频文件/第三方依赖） ----------
+def _sfx_tone(freq, ms, vol=0.4, decay=4.0):
+    """8000Hz 16bit 单音采样（指数衰减），返回原始 PCM 字节。"""
+    import math
+    import struct
+    n = max(1, int(8000 * ms / 1000))
+    out = bytearray()
+    for i in range(n):
+        s = vol * (0.5 ** (i / n * decay)) * math.sin(2 * math.pi * freq * i / 8000)
+        out += struct.pack("<h", max(-32768, min(32767, int(s * 32767))))
+    return bytes(out)
+
+
+def _sfx_wav(*parts):
+    """把 PCM 片段包成最小可用 wav 文件字节。"""
+    import struct
+    payload = b"".join(parts)
+    return (b"RIFF" + struct.pack("<I", len(payload) + 36) + b"WAVEfmt " +
+            struct.pack("<IHHIIHH", 16, 1, 1, 8000, 16000, 2, 16) +
+            b"data" + struct.pack("<I", len(payload)) + payload)
+
+
+def _sfx_build():
+    return {
+        "tick": _sfx_wav(_sfx_tone(1800, 14, 0.15)),          # 击键轻响
+        "ok": _sfx_wav(_sfx_tone(1050, 35, 0.32),             # 答对双音上扬
+                       _sfx_tone(1450, 55, 0.32)),
+        "bad": _sfx_wav(_sfx_tone(210, 130, 0.42)),           # 答错低鸣
+    }
 
 
 def sys_prefers_dark():
@@ -173,6 +208,16 @@ class App(tk.Tk):
         self.content_name = tk.StringVar(value="常用 2000 字")
         self.show_py = tk.BooleanVar(value=True)
         self.show_kb = tk.BooleanVar(value=True)
+        self.sfx_on = tk.BooleanVar(value=store.get("sfx", True))
+        self.history = store.get("history", {})   # 每日: practiced/correct/time
+        self._sfx = None                          # 惰性生成的音效 wav
+        self._last_answer_ts = None               # 上一题作答时刻（记历史用时）
+        self._custom_book = None                  # 自定义文本构建后的书
+        # 限时挑战
+        self.challenge_end = None
+        self.ch_answered = 0
+        self.ch_ok = 0
+        self.ch_wrong = []
 
         self.typed = ""
         self.cur = None
@@ -284,6 +329,17 @@ class App(tk.Tk):
         self.lb_stats.pack(side="left", padx=18)
         self.lb_cum = tk.Label(bar)
         self.lb_cum.pack(side="right")
+        self.cb_sfx = tk.Checkbutton(bar, text="音效", variable=self.sfx_on,
+                                     takefocus=0, command=self._save_store)
+        self.cb_sfx.pack(side="right", padx=(0, 14))
+        self.btn_history = tk.Button(bar, text="历史",
+                                     command=self._open_history,
+                                     relief="flat", takefocus=0, padx=10)
+        self.btn_history.pack(side="right", padx=(0, 10))
+        self.btn_challenge = tk.Button(bar, text="60 秒挑战",
+                                       command=self._toggle_challenge,
+                                       relief="flat", takefocus=0, padx=10)
+        self.btn_challenge.pack(side="right", padx=(0, 10))
 
         self.main = tk.Frame(self)
         self.main.grid(row=2, column=0, sticky="nsew", padx=16, pady=8)
@@ -328,7 +384,7 @@ class App(tk.Tk):
         return m
 
     def _content_names(self):
-        names = ["常用 2000 字", "错字练习"]
+        names = ["常用 2000 字", "错字练习", "自定义文本"]
         names += [b["name"] + ("（选）" if b.get("select") else "")
                   for b in self.books]
         return names
@@ -394,10 +450,11 @@ class App(tk.Tk):
             w["menu"].configure(bg=P["menu_bg"], fg=P["ctrl_fg"],
                                 activebackground=P["ctrl_active"],
                                 activeforeground=P["ctrl_fg"])
-        for cb in (self.cb_py, self.cb_kb):
+        for cb in (self.cb_py, self.cb_kb, self.cb_sfx):
             cb.configure(bg=P["bg"], fg=P["fg"], activebackground=P["bg"],
                          selectcolor=P["select"])
-        for w in (self.btn_pause, self.btn_reset):
+        for w in (self.btn_pause, self.btn_reset, self.btn_challenge,
+                  self.btn_history):
             w.configure(bg=P["ctrl_bg"], fg=P["ctrl_fg"],
                         activebackground=P["ctrl_active"],
                         activeforeground=P["ctrl_fg"])
@@ -457,7 +514,8 @@ class App(tk.Tk):
             self.lb_status.configure(font=fonts["status"][1])
             self.lb_rule.configure(font=fonts["rule"][0])
             for w2 in (self.theme_menu, self.content_menu, self.scope_menu,
-                       self.cb_py, self.cb_kb, self.btn_pause, self.btn_reset):
+                       self.cb_py, self.cb_kb, self.cb_sfx, self.btn_pause,
+                       self.btn_reset, self.btn_challenge, self.btn_history):
                 w2.configure(font=fonts["ctrl"][0])
             for w2 in (self.theme_menu, self.content_menu, self.scope_menu):
                 w2["menu"].configure(font=fonts["ctrl"][0])
@@ -513,6 +571,31 @@ class App(tk.Tk):
                 self._rescale()
                 self.reset_session()
                 return
+        if cid == "custom":
+            book = self._custom_book or self._load_custom_book()
+            if book is None:
+                if restore:        # 启动时无保存文本：落回常用字
+                    cid = "chars"
+                else:
+                    self._open_custom_editor()
+                    return
+            else:
+                self._custom_book = book
+                self.book = book
+                self.content_id = "custom"
+                self.content_name.set("自定义文本")
+                self.scope_menu.pack_forget()
+                self.t_text.pack(fill="x", pady=(0, 0),
+                                 before=self.lb_char)
+                ch = self.pos_map.get("custom", [0, 0]) if restore else [0, 0]
+                self.t_ch, self.t_seg = ch[0], ch[1]
+                self._cache_book()
+                self._load_segments()
+                self.t_pos = 0
+                self._save_store()
+                self._rescale()
+                self.reset_session(keep_pos=restore)
+                return
         self.book = next((b for b in self.books
                           if b["id"] == cid and b.get("chapters")), None)
         self.content_id = cid if self.book else "chars"
@@ -541,6 +624,9 @@ class App(tk.Tk):
         if value == "错字练习":
             self._select_content("wrong")
             return
+        if value == "自定义文本":
+            self._open_custom_editor()
+            return
         name = value.replace("（选）", "")
         cid = next((b["id"] for b in self.books if b["name"] == name),
                    "chars")
@@ -548,6 +634,119 @@ class App(tk.Tk):
 
     def _chapters(self):
         return self.book["chapters"] if self.book else []
+
+    # ----- 自定义文本 -----
+    def _load_custom_book(self):
+        try:
+            with open(CUSTOM_FILE, encoding="utf-8") as f:
+                return self._build_custom_book(f.read())
+        except Exception:
+            return None
+
+    def _build_custom_book(self, text):
+        """空行分段→单节 ≤500 字切章，逐字配拼音（未收录汉字自动跳过）。"""
+        blocks = [b for b in re.split(r"\n\s*\n", text.strip()) if b.strip()]
+        chunks = []
+        for b in blocks:
+            b = "".join(b.split())          # 段内去掉空白与换行
+            for i in range(0, len(b), 500):
+                chunks.append(b[i:i + 500])
+        if not chunks:
+            return None
+        chaps = []
+        for idx, cbody in enumerate(chunks, 1):
+            ent = self._char_map
+            pyl = [[ent[ch]["p"], ent[ch]["f"]] if ch in ent else None
+                   for ch in cbody]
+            chaps.append({"t": f"第 {idx}/{len(chunks)} 节",
+                          "body": cbody, "pyl": pyl})
+        return {"id": "custom", "name": "自定义文本", "select": False,
+                "chapters": chaps}
+
+    def _open_custom_editor(self):
+        prev = self.content_name.get()
+        applied = []
+        win = tk.Toplevel(self)
+        win.title("自定义文本")
+        win.geometry("560x430")
+        win.configure(bg=self.P["panel"])
+        win.transient(self)
+
+        tip = tk.Label(
+            win, wraplength=520, justify="left",
+            text="粘贴或导入要练习的文章（空行分段；未收录的生僻字会自动跳过）",
+            bg=self.P["panel"], fg=self.P["grey"])
+        tip.pack(anchor="w", padx=14, pady=(12, 4))
+        body = tk.Text(win, wrap="char", bd=0, font=(YA, 12),
+                       bg=self.P["key_bg"], fg=self.P["fg"],
+                       insertbackground=self.P["fg"], height=10)
+        body.pack(fill="both", expand=True, padx=14, pady=6)
+        try:
+            with open(CUSTOM_FILE, encoding="utf-8") as f:
+                body.insert("1.0", f.read())
+        except Exception:
+            pass
+
+        btns = tk.Frame(win, bg=self.P["panel"])
+        btns.pack(fill="x", padx=14, pady=(0, 12))
+
+        def do_import():
+            from tkinter import filedialog
+            p = filedialog.askopenfilename(
+                parent=win, title="导入文本",
+                filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")])
+            if not p:
+                return
+            for enc in ("utf-8", "gbk"):
+                try:
+                    with open(p, encoding=enc) as f:
+                        data = f.read()
+                    break
+                except (UnicodeDecodeError, OSError):
+                    data = None
+            if data is None:
+                messagebox.showinfo("自定义文本", "无法读取该文件（编码不是 UTF-8/GBK）")
+                return
+            body.delete("1.0", "end")
+            body.insert("1.0", data)
+
+        def do_ok():
+            text = body.get("1.0", "end").strip()
+            book = self._build_custom_book(text)
+            if book is None:
+                messagebox.showinfo("自定义文本", "没有可练习的内容（需要包含汉字）")
+                return
+            applied.append(True)
+            self._custom_book = book
+            try:
+                with open(CUSTOM_FILE, "w", encoding="utf-8") as f:
+                    f.write(text)
+            except Exception:
+                pass
+            win.destroy()
+            self._select_content("custom")
+
+        def on_cancel():
+            if not applied:            # 取消：菜单显示回到原模式
+                self.content_name.set(prev)
+            win.destroy()
+
+        tk.Button(btns, text="导入 .txt…", command=do_import,
+                  bg=self.P["ctrl_bg"], fg=self.P["ctrl_fg"],
+                  activebackground=self.P["ctrl_active"],
+                  activeforeground=self.P["ctrl_fg"],
+                  relief="flat", padx=12).pack(side="left")
+        tk.Button(btns, text="取消", command=on_cancel,
+                  bg=self.P["ctrl_bg"], fg=self.P["ctrl_fg"],
+                  activebackground=self.P["ctrl_active"],
+                  activeforeground=self.P["ctrl_fg"],
+                  relief="flat", padx=12).pack(side="right")
+        tk.Button(btns, text="开始练习", command=do_ok,
+                  bg=self.P["blue"], fg="#ffffff",
+                  activebackground=self.P["blue"],
+                  activeforeground="#ffffff",
+                  relief="flat", padx=14).pack(side="right", padx=(0, 8))
+        win.protocol("WM_DELETE_WINDOW", on_cancel)
 
     def _chapter(self):
         chs = self._chapters()
@@ -843,6 +1042,10 @@ class App(tk.Tk):
         self.cum["practiced"] += 1
         self.cum["wrong"] += 1
         self._remember_wrong()
+        self._record_history(False)
+        if self.challenge_end is not None:
+            self.ch_answered += 1
+            self.ch_wrong.append(self._expected()[1])
         self.state = "locked_no"
         self.slot1.configure(text=c0, fg=self.P["orange"])
         self.slot2.configure(text=c1, fg=self.P["orange"])
@@ -879,6 +1082,7 @@ class App(tk.Tk):
         """键入一个字母：更新码槽，凑满两键即判定。"""
         if self.started_at is None:
             self.started_at = time.time()
+        self._play("tick")
         self.typed += ch
         if len(self.typed) == 1:
             self.slot1.configure(text=ch, fg=self.P["blue"])
@@ -904,6 +1108,10 @@ class App(tk.Tk):
                 ent = self.cur
             if ent in self.wrong_recent:
                 self.wrong_recent.remove(ent)   # 答对即移出错字本
+            self._record_history(True)
+            if self.challenge_end is not None:
+                self.ch_answered += 1
+                self.ch_ok += 1
             self.state = "locked_ok"
             self.slot1.configure(text=expected[0], fg=self.P["green"])
             self.slot2.configure(text=expected[1], fg=self.P["green"])
@@ -911,6 +1119,7 @@ class App(tk.Tk):
             if self.streak >= 3:
                 msg += f"  连对 {self.streak}"
             self.lb_status.configure(text=msg, fg=self.P["green"])
+            self._play("ok")
             self._flash(True)
             self._refresh_stats()
             self._mark_dirty()
@@ -921,12 +1130,17 @@ class App(tk.Tk):
             self.streak = 0
             self.cum["wrong"] += 1
             self._remember_wrong()
+            self._record_history(False)
+            if self.challenge_end is not None:
+                self.ch_answered += 1
+                self.ch_wrong.append(self._expected()[1])
             self.state = "locked_no"
             self.slot1.configure(text=self.typed[0], fg=self.P["red"])
             self.slot2.configure(text=self.typed[1], fg=self.P["red"])
             self.lb_status.configure(
                 text=f"✗ 正确编码：{expected[0]} {expected[1]}（空格继续）",
                 fg=self.P["red"])
+            self._play("bad")
             self._flash(False)
             self._refresh_answer()
             self._refresh_stats()
@@ -955,6 +1169,10 @@ class App(tk.Tk):
         return max(0.0, end - self.started_at - self.paused_total)
 
     def toggle_pause(self):
+        if self.challenge_end is not None:      # 挑战中不允许暂停（防作弊）
+            self.lb_status.configure(text="挑战进行中，不能暂停",
+                                     fg=self.P["orange"])
+            return
         if self.paused_at is not None:      # 继续
             self.paused_total += time.time() - self.paused_at
             self.paused_at = None
@@ -972,6 +1190,194 @@ class App(tk.Tk):
             self.lb_status.configure(
                 text="⏸ 已暂停 · 休息一下，按任意键或点「继续」接着练",
                 fg=self.P["orange"], font=(YA, self._status_size))
+
+    # ----- 60 秒限时挑战 -----
+    def _toggle_challenge(self):
+        if self.challenge_end is not None:      # 再点一次 = 提前结束出成绩
+            self._end_challenge()
+            return
+        self.challenge_end = time.time() + CHALLENGE_SECS
+        self.ch_answered = self.ch_ok = 0
+        self.ch_wrong = []
+        self.btn_challenge.configure(text="结束挑战")
+        self.lb_status.configure(text=f"⏱ {CHALLENGE_SECS} 秒挑战开始，加油！",
+                                 fg=self.P["blue"],
+                                 font=(YA, self._status_size))
+        self._refresh_scope_label()
+
+    def _cancel_challenge(self):
+        """静默取消（重新开始/切换内容时），不出成绩单。"""
+        if self.challenge_end is not None:
+            self.challenge_end = None
+            self.btn_challenge.configure(text="60 秒挑战")
+            self._refresh_scope_label()
+
+    def _end_challenge(self):
+        if self.challenge_end is None:
+            return
+        self._cancel_challenge()
+        n, ok = self.ch_answered, self.ch_ok
+        acc = ok / n * 100 if n else 0
+        lines = [f"字数 {n} · 正确 {ok} · 正确率 {acc:.0f}%",
+                 f"速度 {n} 字/分（限时 {CHALLENGE_SECS} 秒）"]
+        wrongs = list(dict.fromkeys(self.ch_wrong))
+        if wrongs:
+            lines.append("错字：" + "、".join(wrongs[:12]))
+        win = tk.Toplevel(self)
+        win.title("挑战成绩")
+        win.geometry("360x230")
+        win.configure(bg=self.P["panel"])
+        win.transient(self)
+        win.grab_set()
+        tk.Label(win, text="⏱ 挑战结束", bg=self.P["panel"], fg=self.P["fg"],
+                 font=(YA, 16, "bold")).pack(pady=(18, 6))
+        tk.Label(win, text="\n".join(lines), bg=self.P["panel"],
+                 fg=self.P["fg"], font=(YA, 13), justify="left").pack(padx=24)
+        btns = tk.Frame(win, bg=self.P["panel"])
+        btns.pack(pady=16)
+
+        def again():
+            win.destroy()
+            self._toggle_challenge()
+
+        def done():
+            win.destroy()
+            self.lb_status.configure(text="挑战结束 · 继续练习",
+                                     fg=self.P["grey"])
+        tk.Button(btns, text="再来一轮", command=again, relief="flat",
+                  padx=14, bg=self.P["blue"], fg="#ffffff",
+                  activebackground=self.P["blue"],
+                  activeforeground="#ffffff").pack(side="left", padx=8)
+        tk.Button(btns, text="继续练习", command=done, relief="flat",
+                  padx=14, bg=self.P["ctrl_bg"], fg=self.P["ctrl_fg"],
+                  activebackground=self.P["ctrl_active"],
+                  activeforeground=self.P["ctrl_fg"]).pack(side="left", padx=8)
+
+    # ----- 每日打卡 / 历史统计 -----
+    def _record_history(self, ok):
+        today = time.strftime("%Y-%m-%d")
+        d = self.history.setdefault(
+            today, {"practiced": 0, "correct": 0, "time": 0.0})
+        d["practiced"] += 1
+        if ok:
+            d["correct"] += 1
+        if self._last_answer_ts is not None:
+            d["time"] += min(120.0, max(0.0, time.time() - self._last_answer_ts))
+        self._last_answer_ts = time.time()
+        if len(self.history) > HISTORY_KEEP:      # 只保留最近 HISTORY_KEEP 天
+            for k in sorted(self.history)[:-HISTORY_KEEP]:
+                del self.history[k]
+
+    def _streak_days(self):
+        """连续打卡天数（今天已练则含今天，否则截至昨天）。"""
+        from datetime import date, timedelta
+        d, streak = date.today(), 0
+        if not self.history.get(d.isoformat(), {}).get("practiced"):
+            d -= timedelta(days=1)
+        while self.history.get(d.isoformat(), {}).get("practiced"):
+            streak += 1
+            d -= timedelta(days=1)
+        return streak
+
+    def _open_history(self):
+        win = tk.Toplevel(self)
+        win.title("历史统计（近 30 天）")
+        win.geometry("700x340")
+        win.configure(bg=self.P["panel"])
+        win.transient(self)
+        canvas = tk.Canvas(win, highlightthickness=0, bd=0,
+                           bg=self.P["panel"])
+        canvas.pack(fill="both", expand=True, padx=12, pady=10)
+        win.update_idletasks()
+        self._draw_history(canvas)
+        canvas.bind("<Configure>", lambda e: self._draw_history(canvas))
+
+    def _draw_history(self, canvas):
+        canvas.delete("all")
+        W = canvas.winfo_width()
+        H = canvas.winfo_height()
+        if W < 60 or H < 60:
+            return
+        P = self.P
+        from datetime import date, timedelta
+        days = []
+        d = date.today()
+        for _ in range(30):
+            days.append(d.isoformat())
+            d -= timedelta(days=1)
+        days.reverse()
+        data = [self.history.get(k) or {} for k in days]
+        counts = [e.get("practiced", 0) for e in data]
+        speeds = []
+        for e in data:
+            t = e.get("time", 0.0)
+            c = e.get("correct", 0)
+            speeds.append(c / (t / 60) if t >= 30 and c else None)
+        x0, y0 = 46, 24                      # 绘图区
+        x1, y1 = W - 16, H - 34
+        maxc = max(10, max(counts))
+        grey = P["grey"]
+        # 横网格 + 刻度
+        for i in range(1, 4):
+            y = y1 - (y1 - y0) * i / 4
+            canvas.create_line(x0, y, x1, y, fill=P["key_border"], dash=(2, 4))
+            canvas.create_text(x0 - 6, y, text=str(int(maxc * i / 4)),
+                               fill=grey, anchor="e", font=(YA, 9))
+        bw = (x1 - x0) / 30
+        for i, n in enumerate(counts):
+            if not n:
+                continue
+            h = (y1 - y0) * n / maxc
+            canvas.create_rectangle(x0 + i * bw + 1, y1 - h,
+                                    x0 + (i + 1) * bw - 1, y1,
+                                    fill=P["blue"], outline="")
+        # 速度折线
+        pts = []
+        for i, s in enumerate(speeds):
+            if s:
+                maxs = 80.0
+                y = y1 - (y1 - y0) * min(1.0, s / maxs)
+                pts.extend([x0 + (i + 0.5) * bw, y])
+        if len(pts) >= 4:
+            canvas.create_line(*pts, fill=P["orange"], width=2, smooth=True)
+        # 日期轴
+        for i in range(0, 30, 5):
+            label = days[i][5:]              # MM-DD
+            canvas.create_text(x0 + (i + 0.5) * bw, y1 + 14, text=label,
+                               fill=grey, font=(YA, 9))
+        canvas.create_line(x0, y1, x1, y1, fill=P["key_border"])
+        canvas.create_text(x0, y0 - 10, anchor="w", fill=grey, font=(YA, 10),
+                           text="柱 = 每日字数    橙线 = 速度（字/分）")
+        if max(counts) == 0:
+            canvas.create_text((x0 + x1) / 2, (y0 + y1) / 2,
+                               text="还没有练习记录，先打几题吧",
+                               fill=grey, font=(YA, 14))
+
+    # ----- 打字音效 -----
+    def _play(self, kind):
+        if not self.sfx_on.get():
+            return
+        try:
+            if self._sfx is None:
+                self._sfx = _sfx_build()
+            wav = self._sfx[kind]
+            if sys.platform == "win32":
+                import winsound
+                winsound.PlaySound(wav, winsound.SND_MEMORY
+                                   | winsound.SND_ASYNC)
+            elif sys.platform == "darwin":
+                import subprocess
+                sfx_dir = os.path.join(APP_DIR, "sfx")
+                os.makedirs(sfx_dir, exist_ok=True)
+                path = os.path.join(sfx_dir, kind + ".wav")
+                if not os.path.exists(path):
+                    with open(path, "wb") as f:
+                        f.write(wav)
+                subprocess.Popen(["afplay", path],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
 
     # ----- 对/错视觉反馈：面板底色闪烁 + 大字变色 + 状态加粗放大 -----
     def _flash(self, ok):
@@ -1003,6 +1409,7 @@ class App(tk.Tk):
 
     def reset_session(self, keep_pos=False):
         self._cancel_auto()
+        self._cancel_challenge()
         if self._zero_job is not None:
             self.after_cancel(self._zero_job)
             self._zero_job = None
@@ -1010,6 +1417,7 @@ class App(tk.Tk):
             self.paused_at = None
             self.btn_pause.configure(text="暂停")
         self.paused_total = 0.0
+        self._last_answer_ts = None
         self._pending_key = ""
         self._just_wrapped = False
         self.answered = self.ok = self.bad = 0
@@ -1024,6 +1432,11 @@ class App(tk.Tk):
         self._next_char()
 
     def _refresh_scope_label(self):
+        if self.challenge_end is not None:
+            left = max(0, int(self.challenge_end - time.time() + 0.999))
+            self.lb_scope.configure(
+                text=f"⏱ 60 秒挑战 · 剩余 {left}s")
+            return
         if self._is_text_mode():
             ch = self._chapter()
             done = sum(self.t_ch_counts[:self.t_ch]) + self.t_seg + 1
@@ -1050,7 +1463,8 @@ class App(tk.Tk):
         cacc = c["correct"] / c["practiced"] * 100 if c["practiced"] else 0
         self._refresh_scope_label()
         self.lb_cum.configure(
-            text=f"累计已练 {c['practiced']} 字 · 正确率 {cacc:.0f}%")
+            text=f"累计已练 {c['practiced']} 字 · 正确率 {cacc:.0f}%"
+                 f" · 连续打卡 {self._streak_days()} 天")
 
     def _tick(self):
         try:
@@ -1062,6 +1476,12 @@ class App(tk.Tk):
                 dark = sys_prefers_dark()
                 if dark != self._cur_eff_dark:
                     self._apply_theme()
+            if self.challenge_end is not None:
+                left = self.challenge_end - time.time()
+                if left <= 0:
+                    self._end_challenge()
+                else:
+                    self._refresh_scope_label()
             self._refresh_stats()
         except tk.TclError:
             pass    # 瞬时错误不中断心跳链
@@ -1200,7 +1620,9 @@ class App(tk.Tk):
                 "theme": self.theme_mode,
                 "content": self.content_id,
                 "pos": self.pos_map,
-                "wrong_chars": [e["c"] for e in self.wrong_recent]}
+                "wrong_chars": [e["c"] for e in self.wrong_recent],
+                "sfx": bool(self.sfx_on.get()),
+                "history": self.history}
         try:
             # 原子写：防中途崩溃损坏 stats.json
             tmp = STATS_FILE + ".tmp"
